@@ -1,0 +1,2504 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  Folder,
+  Search,
+  Settings,
+  ChevronDown,
+  ArrowLeft,
+  ArrowRight,
+  Plus,
+  X,
+  FileCode,
+  PanelLeft,
+  Save,
+  Bookmark,
+  MoreHorizontal,
+  Pin,
+  RefreshCw,
+} from "lucide-react";
+import { request, onHostEvent } from "./core/bridge";
+import { DocumentStore } from "./core/documents";
+import {
+  documentId,
+  offsetAt,
+  type DocumentModel,
+  type LocationSnapshot,
+  ownerOf,
+} from "./core/types";
+import {
+  TransactionService,
+  type EditTransaction,
+} from "./refactoring/transactions";
+import { LanguageManager, type LanguageLocation } from "./languages/client";
+import { NavigationHistory } from "./navigation/history";
+import { BookmarkStore } from "./navigation/bookmarks";
+import { Editor, migrateEditorState, type EditorHandle } from "./editor/Editor";
+import { ProjectTree } from "./shell/ProjectTree";
+import { Modal } from "./shell/Modal";
+import { useNativeMenu } from "./shell/NativeMenu";
+import { AddFolderDialog } from "./shell/AddFolderDialog";
+import { SearchDialog } from "./shell/SearchDialog";
+import { Preview } from "./markdown/Preview";
+import {
+  defaults,
+  validatePreferences,
+  type Preferences,
+} from "./settings/preferences";
+import { shortcuts, matchesBinding } from "./settings/shortcuts";
+import { base, type Root, parseLocation } from "./workspaces/model";
+const documents = new DocumentStore(),
+  transactions = new TransactionService(documents),
+  languages = new LanguageManager(),
+  history = new NavigationHistory(),
+  bookmarks = new BookmarkStore();
+languages.documents = documents;
+type MenuItem = {
+  label: string;
+  action: () => void;
+  hint?: string;
+  disabled?: string;
+  separator?: boolean;
+};
+export default function App() {
+  const [tick, setTick] = useState(0),
+    [roots, setRoots] = useState<Root[]>([]),
+    [tabs, setTabs] = useState<string[]>([]),
+    [active, setActive] = useState(""),
+    [settings, setSettings] = useState<Preferences>(defaults),
+    [treeVisible, setTreeVisible] = useState(true),
+    [modal, setModal] = useState<string | null>(null),
+    [error, setError] = useState(""),
+    [searchScope, setSearchScope] = useState<
+      { root: Root; path: string } | undefined
+    >(),
+    [tx, setTx] = useState<EditTransaction | null>(null),
+    [rename, setRename] = useState(""),
+    [locations, setLocations] = useState<LanguageLocation[]>([]),
+    [menu, setMenu] = useState<{
+      x: number;
+      y: number;
+      items: MenuItem[];
+    } | null>(null),
+    [workspaceName, setWorkspaceName] = useState("Workspace"),
+    [workspaceId, setWorkspaceId] = useState(() => crypto.randomUUID()),
+    [workspaceIdentity, setWorkspaceIdentity] = useState<string | undefined>(),
+    [recoveries, setRecoveries] = useState<any[]>([]),
+    [ready, setReady] = useState(false),
+    [addPath, setAddPath] = useState(""),
+    [addHost, setAddHost] = useState("local"),
+    [remoteApproved, setRemoteApproved] = useState(false),
+    [pendingClose, setPendingClose] = useState<string | null>(null),
+    [fragment, setFragment] = useState<string | undefined>(),
+    [position, setPosition] = useState<LocationSnapshot>(),
+    [auth, setAuth] = useState<any>(null),
+    [authResponse, setAuthResponse] = useState(""),
+    [sourceScroll, setSourceScroll] = useState<Record<string, number>>({});
+  const persistenceQueue = useRef<Promise<void>>(Promise.resolve());
+  const recoveryKey = useRef("recovery:" + crypto.randomUUID());
+  const handledRequests = useRef(new Set<string>());
+  const [referenceIndex, setReferenceIndex] = useState(-1);
+  const bookmarkEditing = useRef<string | undefined>(undefined);
+  const menuOrigin = useRef<LocationSnapshot | undefined>(undefined);
+  const windowId = useRef("main"),
+    allowClose = useRef(false),
+    persistRef = useRef<() => Promise<any>>(async () => {});
+  const editor = useRef<EditorHandle>(null),
+    loaded = useRef(false),
+    saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
+    dragTab = useRef(""),
+    renameTarget = useRef<
+      { documentId: string; version: number; offset: number } | undefined
+    >(undefined);
+  persistRef.current = async () => {
+    const snapshot = {
+      schemaVersion: 1,
+      id: workspaceId,
+      name: workspaceName,
+      workspaceIdentity,
+      roots,
+      tabs,
+      active,
+      documents: documents.snapshot(),
+      transactions: transactions.transactions,
+      bookmarks: bookmarks.bookmarks,
+      history: { entries: history.entries, index: history.index },
+      sourceScroll,
+    };
+    const value = JSON.parse(JSON.stringify(snapshot)) as typeof snapshot;
+    const key = recoveryKey.current,
+      ownerWindow = windowId.current;
+    const write = async () => {
+      await request("session.save", { key, value });
+      await request("session.save", {
+        key: "window:" + ownerWindow,
+        value: { key },
+      });
+      await request("session.register", {
+        entry: {
+          key,
+          windowId: ownerWindow,
+          workspaceId,
+          workspaceIdentity,
+          name: workspaceName,
+          updated: Date.now(),
+          dirtyCount: value.documents.filter((d) => d.dirty).length,
+        },
+      });
+    };
+    const pending = persistenceQueue.current.catch(() => {}).then(write);
+    persistenceQueue.current = pending;
+    return pending;
+  };
+  const doc = documents.documents.get(active),
+    dark =
+      settings.theme === "dark" ||
+      (settings.theme === "system" &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+  languages.roots = roots;
+  const refresh = () => setTick((t) => t + 1);
+  const fail = (e: unknown) => setError(String(e).replace(/^Error: /, ""));
+  useEffect(() => documents.subscribe(refresh), []);
+  useEffect(() => languages.subscribe(refresh), []);
+  useEffect(() => {
+    languages.roots = roots;
+  }, [roots]);
+  useEffect(() => {
+    if (loaded.current) return;
+    loaded.current = true;
+    (async () => {
+      try {
+        if ((window as any).__TAURI_INTERNALS__) {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          windowId.current = getCurrentWindow().label;
+        } else {
+          windowId.current =
+            sessionStorage.getItem("islet-window") || crypto.randomUUID();
+          sessionStorage.setItem("islet-window", windowId.current);
+        }
+        languages.clientId = windowId.current;
+        const prefs = await request<any>("settings.load", {});
+        if (prefs) setSettings(validatePreferences(prefs));
+        const initialArgs =
+          windowId.current === "main"
+            ? await request<string[]>("app.initialArgs", {}).catch(() => [])
+            : [];
+        const initialRequest = initialArgs.length
+          ? await request<any>("app.parseArgs", { args: initialArgs })
+          : null;
+        const pointer = await request<any>("session.load", {
+          key: "window:" + windowId.current,
+        });
+        const priorKey = pointer?.key || "workspace:" + windowId.current;
+        const session = await request<any>("session.load", { key: priorKey });
+        if (session && !initialRequest) await restoreSession(session);
+        else if (session && initialRequest)
+          await request("session.register", {
+            entry: {
+              key: priorKey,
+              windowId: windowId.current,
+              workspaceId: session.id || "legacy",
+              workspaceIdentity: session.workspaceIdentity,
+              name: session.name || "Recovered Workspace",
+              updated: Date.now(),
+              dirtyCount: (session.documents || []).filter((d: any) => d.dirty)
+                .length,
+            },
+          });
+        const args = new URLSearchParams(window.location.search).getAll("root");
+        for (const path of args) await addRoot(path);
+        await request("app.registerWindow", {
+          windowId: windowId.current,
+          name: "Workspace",
+          focused: true,
+        });
+        const pending = await request<any>("app.pendingRequests", {
+          windowId: windowId.current,
+        }).catch(() => []);
+        for (const req of pending || []) await handleCli(req);
+        if (initialRequest)
+          await handleCli({ ...initialRequest, newWindow: false });
+        await languages.connect();
+      } catch (e) {
+        fail(e);
+      } finally {
+        setReady(true);
+      }
+    })();
+    const focus = () => {
+      void request("app.registerWindow", {
+        windowId: windowId.current,
+        focused: true,
+      });
+      for (const id of documents.documents.keys())
+        void documents.checkExternal(id).catch(() => {});
+    };
+    window.addEventListener("focus", focus);
+    return () => window.removeEventListener("focus", focus);
+  }, []);
+  useEffect(() => {
+    if (!ready) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(
+      () => void persistRef.current().catch(fail),
+      200,
+    );
+  }, [
+    tick,
+    roots,
+    tabs,
+    active,
+    workspaceName,
+    workspaceId,
+    ready,
+    sourceScroll,
+  ]);
+  useEffect(() => {
+    if (ready) void request("settings.save", { value: settings }).catch(fail);
+  }, [settings, ready]);
+  useEffect(() => {
+    if (!(window as any).__TAURI_INTERNALS__) return;
+    let off: (() => void) | undefined;
+    let disposed = false;
+    void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
+      const native = getCurrentWindow();
+      const cleanup = await native.onCloseRequested(async (event) => {
+        if (allowClose.current) return;
+        event.preventDefault();
+        if ([...documents.documents.values()].some((d) => d.dirty)) {
+          setModal("close-window");
+          return;
+        }
+        try {
+          await persistRef.current();
+          allowClose.current = true;
+          await native.close();
+        } catch (e) {
+          fail(e);
+        }
+      });
+      if (disposed) cleanup();
+      else off = cleanup;
+    });
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
+  async function closeNative(saveChanges: boolean) {
+    try {
+      if (saveChanges) await saveAll();
+      await persistRef.current();
+      allowClose.current = true;
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
+    } catch (e) {
+      fail(e);
+    }
+  }
+  useEffect(() => {
+    const before = (e: BeforeUnloadEvent) => {
+      if ([...documents.documents.values()].some((d) => d.dirty)) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", before);
+    return () => window.removeEventListener("beforeunload", before);
+  }, []);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    void onHostEvent("host-event", (event) => {
+      if (event.type === "file-changed") {
+        const id = documentId(event.hostId, event.path);
+        if (documents.documents.has(id))
+          void documents.checkExternal(id).catch(fail);
+      }
+      if (event.type === "authentication") {
+        setAuth(event);
+        setAuthResponse("");
+      }
+      if (
+        event.type === "cli-request" &&
+        (!event.request.windowId || event.request.windowId === windowId.current)
+      )
+        void handleCli(event.request).catch(fail);
+      if (event.type === "connection")
+        setRoots((rs) =>
+          rs.map((r) =>
+            r.hostId === event.hostId ? { ...r, state: event.state } : r,
+          ),
+        );
+    }).then((f) => (off = f));
+    return () => off?.();
+  }, []);
+  useEffect(() => {
+    if (ready)
+      void request("app.registerWindow", {
+        windowId: windowId.current,
+        name: workspaceName,
+        workspaceId,
+        workspaceIdentity,
+      }).catch(fail);
+  }, [ready, workspaceName, workspaceId, workspaceIdentity]);
+  async function restoreSession(session: any) {
+    documents.documents.clear();
+    transactions.transactions = [];
+    bookmarks.bookmarks = [];
+    history.entries = [];
+    history.index = -1;
+    setWorkspaceIdentity(session.workspaceIdentity);
+
+    const restored: Root[] = session.roots || [];
+    setRoots(
+      restored.map((root) => ({
+        ...root,
+        state: root.hostId === "local" ? "ready" : "connecting",
+      })),
+    );
+    const localRoots = restored.filter((root) => root.hostId === "local");
+    await Promise.all(
+      localRoots.map(async (root) => {
+        try {
+          const checked = await request<Root>("root.open", root);
+          setRoots((rs) => rs.map((r) => (r.id === root.id ? checked : r)));
+        } catch {
+          setRoots((rs) =>
+            rs.map((r) =>
+              r.id === root.id ? { ...r, state: "unavailable" } : r,
+            ),
+          );
+        }
+      }),
+    );
+    for (const root of restored.filter((root) => root.hostId !== "local"))
+      void request<Root>("root.open", root)
+        .then((checked) => {
+          setRoots((rs) => rs.map((r) => (r.id === root.id ? checked : r)));
+          for (const d of documents.documents.values())
+            if (d.hostId === root.hostId) void validateRestored(d);
+        })
+        .catch(() =>
+          setRoots((rs) =>
+            rs.map((r) =>
+              r.id === root.id ? { ...r, state: "disconnected" } : r,
+            ),
+          ),
+        );
+    setTabs(session.tabs || []);
+    setActive(session.active || "");
+    setWorkspaceName(session.name || "Workspace");
+    setWorkspaceId(session.id || "default");
+    documents.restore(session.documents || []);
+    transactions.transactions = session.transactions || [];
+    bookmarks.bookmarks = session.bookmarks || [];
+    history.entries = session.history?.entries || [];
+    history.index = session.history?.index ?? -1;
+    setSourceScroll(session.sourceScroll || {});
+    for (const restoredDoc of documents.documents.values())
+      if (restoredDoc.hostId === "local") void validateRestored(restoredDoc);
+    documents.emit();
+  }
+  async function openManifest(path: string, preferNewWindow = true) {
+    const manifest: any = await request("workspace.load", { path });
+    if (roots.length || documents.documents.size) {
+      if (!preferNewWindow)
+        throw Error(
+          "This window already contains a workspace. Open the manifest in a new window to preserve its current recovery.",
+        );
+      const created: any = await request("app.newWindow", {});
+      await request("cli.deliver", {
+        operation: "open",
+        workspace: manifest.manifestPath || path,
+        newWindow: false,
+        windowId: created.windowId,
+        requestId: crypto.randomUUID(),
+      });
+      return;
+    }
+    const entries: any[] = await request("session.list", {});
+    const previous = entries.find(
+      (entry) => entry.workspaceIdentity === (manifest.manifestPath || path),
+    );
+    const prior = previous
+      ? await request<any>("session.load", { key: previous.key })
+      : null;
+    const included = (prior?.documents || []).filter(
+      (document: DocumentModel) =>
+        manifest.roots.some(
+          (root: Root) =>
+            root.hostId === document.hostId &&
+            (document.path === root.path ||
+              document.path.startsWith(root.path.replace(/\/$/, "") + "/")),
+        ) || document.readonly,
+    );
+    const ids = new Set(included.map((document: DocumentModel) => document.id));
+    await restoreSession({
+      ...prior,
+      id: manifest.id || crypto.randomUUID(),
+      name: manifest.name || base(path),
+      workspaceIdentity: manifest.manifestPath || path,
+      roots: manifest.roots,
+      documents: included,
+      tabs: (prior?.tabs || []).filter((id: string) => ids.has(id)),
+      active: ids.has(prior?.active) ? prior.active : "",
+      transactions: (prior?.transactions || []).filter((tx: any) =>
+        tx.files.every((file: any) => ids.has(file.documentId)),
+      ),
+    });
+  }
+  async function showRecoveries() {
+    try {
+      setRecoveries(
+        (await request<any[]>("session.list", {})).filter(
+          (entry) => entry.key !== recoveryKey.current,
+        ),
+      );
+      setModal("recovery");
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function validateRestored(document: DocumentModel) {
+    try {
+      await documents.checkExternal(document.id);
+      bookmarks.relocate(document);
+      await request("fs.watch", {
+        hostId: document.hostId,
+        path: document.path,
+      });
+      refresh();
+    } catch (error) {
+      if (document.hostId === "local") fail(error);
+    }
+  }
+  async function handleCli(req: any) {
+    if (req.requestId) {
+      await request("app.ackRequest", { requestId: req.requestId }).catch(
+        () => {},
+      );
+      if (handledRequests.current.has(req.requestId)) return;
+      handledRequests.current.add(req.requestId);
+    }
+    if (req.newWindow) {
+      const created: any = await request("app.newWindow", {});
+      await request("cli.deliver", {
+        ...req,
+        newWindow: false,
+        windowId: created.windowId,
+      });
+      return;
+    }
+    if (req.recoveryKey) {
+      if (roots.length || documents.documents.size)
+        throw Error("Recover this workspace in a new window.");
+      const snapshot = await request<any>("session.load", {
+        key: req.recoveryKey,
+      });
+      if (!snapshot) throw Error("This recovery record is unavailable.");
+      await restoreSession(snapshot);
+      return;
+    }
+    if (req.workspace) {
+      await openManifest(req.workspace, false);
+      return;
+    }
+    for (const item of req.roots || [])
+      await addRoot(
+        typeof item === "string" ? item : item.uri || item.path,
+        item.hostId,
+      );
+  }
+  async function addRoot(value: string, hostOverride?: string) {
+    let parsed: { hostId: string; path: string } | undefined;
+    try {
+      parsed =
+        hostOverride && hostOverride !== "local"
+          ? { hostId: hostOverride, path: value }
+          : parseLocation(value);
+      const root = await request<Root>("root.open", { ...parsed });
+      setRoots((rs) =>
+        rs.some((r) => r.hostId === root.hostId && r.path === root.path)
+          ? rs
+          : [...rs, root],
+      );
+      return root;
+    } catch (e) {
+      if (parsed && parsed.hostId !== "local") {
+        const root = {
+          ...parsed,
+          id: parsed.hostId + ":" + parsed.path,
+          label: base(parsed.path),
+          state: "disconnected",
+        };
+        setRoots((rs) =>
+          rs.some((r) => r.id === root.id) ? rs : [...rs, root],
+        );
+      }
+      fail(e);
+    }
+  }
+  async function openFile() {
+    try {
+      const path = await request<string | null>("dialog.open", {
+        directory: false,
+        multiple: false,
+      });
+      if (!path) return;
+      await addRoot(path.slice(0, path.lastIndexOf("/")) || "/");
+      const file = await documents.open("local", path);
+      setTabs((ts) => (ts.includes(file.id) ? ts : [...ts, file.id]));
+      setActive(file.id);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function browseAdd() {
+    try {
+      const result: any = await request("dialog.open", {
+        directory: true,
+        multiple: true,
+      });
+      for (const path of Array.isArray(result)
+        ? result
+        : result
+          ? [result]
+          : [])
+        await addRoot(typeof path === "string" ? path : path.path);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function capture(): LocationSnapshot | undefined {
+    if (doc?.markdownMode === "preview")
+      return {
+        documentId: doc.id,
+        hostId: doc.hostId,
+        path: doc.path,
+        anchor: 0,
+        head: 0,
+        scrollTop: sourceScroll[doc.id] || 0,
+        scrollLeft: 0,
+        mode: "preview",
+      };
+    const location = editor.current?.snapshot() || doc?.location;
+    return location
+      ? { ...location, mode: doc?.markdownMode ? "source" : undefined }
+      : undefined;
+  }
+  async function open(
+    hostId: string,
+    path: string,
+    preview = false,
+    offset?: number,
+    record = false,
+    hash?: string,
+    dependency = false,
+  ) {
+    const origin = capture();
+    try {
+      const d = await documents.open(hostId, path);
+      if (
+        !ownerOf(roots, hostId, d.path) &&
+        roots.length &&
+        !record &&
+        !dependency
+      ) {
+        setError(
+          "This file is outside the attached workspace. Add its folder first.",
+        );
+        return;
+      }
+      await request("fs.watch", { hostId: d.hostId, path: d.path }).catch(
+        () => {},
+      );
+      if (!ownerOf(roots, hostId, d.path) && roots.length) d.readonly = true;
+      bookmarks.relocate(d);
+      if (d.markdownMode && !d.location)
+        d.markdownMode = settings.markdownDefault;
+      d.preview = preview && !d.pinned;
+      setTabs((previous) => {
+        const next = previous.filter((id) => {
+          const old = documents.documents.get(id);
+          return !(
+            preview &&
+            old?.preview &&
+            !old.dirty &&
+            !old.pinned &&
+            id !== d.id
+          );
+        });
+        return next.includes(d.id) ? next : [...next, d.id];
+      });
+      setActive(d.id);
+      setFragment(hash);
+      if (offset !== undefined && d.markdownMode) d.markdownMode = "source";
+      if (offset !== undefined || record) {
+        offset = offset ?? d.location?.head ?? 0;
+        const destination: LocationSnapshot = {
+          documentId: d.id,
+          hostId: d.hostId,
+          path: d.path,
+          anchor: offset,
+          head: offset,
+          scrollTop: 0,
+          scrollLeft: 0,
+          mode:
+            d.markdownMode === "preview"
+              ? "preview"
+              : d.markdownMode
+                ? "source"
+                : undefined,
+        };
+        if (d.markdownMode !== "preview") {
+          d.location = destination;
+          setTimeout(() => editor.current?.restore(destination), 0);
+        } else setSourceScroll((scrolls) => ({ ...scrolls, [d.id]: 0 }));
+        if (record) history.push(origin, destination);
+      }
+      refresh();
+      return d;
+    } catch (e) {
+      fail(e);
+      return undefined;
+    }
+  }
+  async function navigate(location: LanguageLocation) {
+    const d = await documents.open(location.hostId, location.path);
+    await open(
+      location.hostId,
+      location.path,
+      false,
+      offsetAt(d.text, location.range.start),
+      true,
+    );
+  }
+  async function restore(location: LocationSnapshot | undefined) {
+    if (!location) return false;
+    try {
+      await request("fs.stat", {
+        hostId: location.hostId,
+        path: location.path,
+      });
+      const opened = await open(
+        location.hostId,
+        location.path,
+        false,
+        undefined,
+        false,
+        undefined,
+        true,
+      );
+      if (!opened) return false;
+      if (location.mode === "preview") {
+        opened.markdownMode = "preview";
+        setFragment(undefined);
+        setSourceScroll((scrolls) => ({
+          ...scrolls,
+          [opened.id]: location.scrollTop,
+        }));
+      } else {
+        if (opened.markdownMode) opened.markdownMode = "source";
+        opened.location = location;
+        setTimeout(() => editor.current?.restore(location), 0);
+      }
+      refresh();
+      return true;
+    } catch (e) {
+      fail(e);
+      return false;
+    }
+  }
+  function back() {
+    const index = history.index;
+    const target = history.back(capture());
+    void restore(target).then((ok) => {
+      if (!ok) history.index = index;
+      refresh();
+    });
+  }
+  function forward() {
+    const index = history.index;
+    const target = history.forward(capture());
+    void restore(target).then((ok) => {
+      if (!ok) history.index = index;
+      refresh();
+    });
+  }
+  async function saveAll() {
+    const grouped = new Set<string>();
+    const outcomes: any[] = [];
+    for (const transaction of transactions.transactions.filter(
+      (t) =>
+        t.state === "applied" &&
+        t.files.some((f) => documents.require(f.documentId).dirty) &&
+        t.files.every((f) => documents.require(f.documentId).text === f.after),
+    )) {
+      try {
+        const journal = await transactions.save(transaction);
+        outcomes.push(...journal);
+        for (const file of transaction.files) grouped.add(file.documentId);
+      } catch (e) {
+        fail(e);
+        throw e;
+      }
+    }
+    const loose = [...documents.documents.values()].filter(
+      (d) => d.dirty && !grouped.has(d.id),
+    );
+    const journal = {
+      id: crypto.randomUUID(),
+      files: loose.map((d) => ({
+        documentId: d.id,
+        hostId: d.hostId,
+        path: d.path,
+        state: "pending",
+        error: "",
+      })),
+    };
+    await request("journal.save", { key: journal.id, value: journal });
+    for (const file of journal.files) {
+      try {
+        await documents.save(file.documentId);
+        file.state = "saved";
+      } catch (e) {
+        file.state =
+          documents.require(file.documentId).saveState || "uncertain";
+        file.error = String(e);
+      }
+      await request("journal.save", { key: journal.id, value: journal });
+    }
+    outcomes.push(...journal.files);
+    const failed = outcomes.filter((o) => o.state !== "saved");
+    if (failed.length) {
+      setError(
+        failed
+          .map(
+            (o) =>
+              `${base(documents.require(o.documentId).path)}: ${o.state}${o.error ? " — " + o.error : ""}`,
+          )
+          .join(" · "),
+      );
+      throw Error(
+        failed
+          .map(
+            (o) =>
+              `${documents.require(o.documentId).path}: ${o.state}${o.error ? " — " + o.error : ""}`,
+          )
+          .join(" · "),
+      );
+    }
+    refresh();
+  }
+  async function save() {
+    if (doc)
+      try {
+        await documents.save(doc.id);
+      } catch (e) {
+        fail(e);
+      }
+  }
+  function close(id: string, force = false) {
+    const d = documents.require(id);
+    if (force && d.dirty) {
+      documents.change(id, d.savedText);
+    }
+    if (d.dirty && !force) {
+      setPendingClose(id);
+      setModal("close");
+      return;
+    }
+    const next = tabs.filter((t) => t !== id);
+    setTabs(next);
+    if (active === id) setActive(next[Math.max(0, tabs.indexOf(id) - 1)] || "");
+    setModal(null);
+    setPendingClose(null);
+  }
+  function search(replace = false, initial?: { root: Root; path: string }) {
+    setSearchScope(initial);
+    setModal(replace ? "replace-files" : "find-files");
+    setMenu(null);
+  }
+  async function definition(references = false, targetOffset?: number) {
+    if (!doc) return;
+    try {
+      const offset = targetOffset ?? capture()?.head ?? 0;
+      const found = references
+        ? await languages.references(doc, offset)
+        : await languages.definition(doc, offset);
+      if (!found.length) {
+        setError(
+          "No semantic " +
+            (references ? "references" : "definition") +
+            " found.",
+        );
+        return;
+      }
+      if (found.length === 1 && !references) await navigate(found[0]);
+      else {
+        await Promise.allSettled(
+          found.map((location) =>
+            documents.open(location.hostId, location.path),
+          ),
+        );
+        setLocations(found);
+        setModal("locations");
+      }
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function beginRename(targetOffset?: number) {
+    if (!doc) return;
+    try {
+      const at = targetOffset ?? capture()?.head ?? 0;
+      const version = doc.version;
+      const result: any = await languages.prepareRename(doc, at);
+      if (result === null)
+        throw Error("The language service cannot rename this symbol.");
+      const range = result?.range || result;
+      setRename(
+        result?.placeholder ||
+          (range?.start
+            ? doc.text.slice(
+                offsetAt(doc.text, range.start),
+                offsetAt(doc.text, range.end),
+              )
+            : doc.text.slice(at).match(/^\w+/)?.[0] || ""),
+      );
+      renameTarget.current = { documentId: doc.id, version, offset: at };
+      setModal("rename");
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function previewRename() {
+    if (!doc) return;
+    try {
+      if (!rename.trim()) throw Error("Enter a new identifier.");
+      const target = renameTarget.current;
+      if (
+        !target ||
+        target.documentId !== doc.id ||
+        target.version !== doc.version
+      )
+        throw Error(
+          "The rename target changed. Close this dialog and rename the symbol again.",
+        );
+      const edit = await languages.rename(doc, target.offset, rename);
+      const proposed = await transactions.fromWorkspaceEdit(
+        "Rename symbol",
+        doc.hostId,
+        edit,
+      );
+      if (!proposed.files.length)
+        throw Error("The language service returned no changes.");
+      setTx(proposed);
+      setModal("transaction");
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function bookmark(targetOffset?: number) {
+    if (!doc) return;
+    editor.current?.toggleBookmark(targetOffset ?? capture()?.head);
+    refresh();
+  }
+  function referenceJump(direction: 1 | -1) {
+    const next = referenceIndex + direction;
+    if (next < 0 || next >= locations.length) return;
+    setReferenceIndex(next);
+    void navigate(locations[next]);
+  }
+  function bookmarkJump(direction: 1 | -1) {
+    if (!doc) return;
+    const next = bookmarks.next(doc.id, capture()?.head ?? 0, direction);
+    if (next) void open(next.hostId, next.path, false, next.offset, true);
+  }
+  async function functionJump(direction: 1 | -1) {
+    if (!doc) return;
+    const offset = await editor.current?.functionOffset(direction);
+    if (offset !== undefined)
+      await open(doc.hostId, doc.path, false, offset, true);
+  }
+  function command(id: string) {
+    id =
+      (
+        {
+          "find-files": "findFiles",
+          "replace-files": "replaceFiles",
+          "next-function": "nextFunction",
+          "previous-function": "previousFunction",
+          selectAll: "select-all",
+        } as Record<string, string>
+      )[id] || id;
+    if (id === "bookmarks-changed") {
+      refresh();
+      return;
+    }
+    const actions: Record<string, () => void> = {
+      save: () => void save(),
+      closeTab: () => {
+        if (active) close(active);
+      },
+      definition: () => void definition(),
+      references: () => void definition(true),
+      rename: () => void beginRename(),
+      back: back,
+      forward: forward,
+      bookmark: bookmark,
+      bookmarks: () => setModal("bookmarks"),
+      previousBookmark: () => bookmarkJump(-1),
+      nextBookmark: () => bookmarkJump(1),
+      findFiles: () => search(),
+      replaceFiles: () => search(true),
+      nextFunction: () => void functionJump(1),
+      previousFunction: () => void functionJump(-1),
+      undoGroup: () => void transactions.undo().catch(fail),
+    };
+    if (actions[id]) actions[id]();
+    else editor.current?.command(id);
+    setMenu(null);
+  }
+  function editorMenu(x: number, y: number, offset?: number) {
+    menuOrigin.current = capture();
+    const items: MenuItem[] = [
+      { label: "Undo", action: () => command("undo"), hint: "⌘Z" },
+      { label: "Redo", action: () => command("redo"), hint: "⇧⌘Z" },
+      { label: "Cut", action: () => command("cut"), hint: "⌘X" },
+      { label: "Copy", action: () => command("copy"), hint: "⌘C" },
+      { label: "Paste", action: () => command("paste"), hint: "⌘V" },
+      { label: "Select All", action: () => command("selectAll"), hint: "⌘A" },
+      {
+        label: "Go to Definition",
+        action: () => void definition(false, offset),
+        hint: "⌘B",
+        separator: true,
+      },
+      {
+        label: "Find References",
+        action: () => void definition(true, offset),
+        hint: "⌥F7",
+      },
+      {
+        label: "Back",
+        action: back,
+        disabled: !history.canBack ? "No previous location" : undefined,
+        hint: "⌘[",
+      },
+      {
+        label: "Forward",
+        action: forward,
+        disabled: !history.canForward ? "No next location" : undefined,
+        hint: "⌘]",
+      },
+      { label: "Previous Function", action: () => void functionJump(-1) },
+      { label: "Next Function", action: () => void functionJump(1) },
+      {
+        label: "Toggle Bookmark",
+        action: () => bookmark(offset),
+        separator: true,
+        hint: "⌘F11",
+      },
+      {
+        label: "Edit Bookmark Label",
+        action: () => {
+          const at = offset ?? capture()?.head ?? 0;
+          const line = doc?.text.slice(0, at).split("\n").length! - 1;
+          const b = bookmarks.bookmarks.find(
+            (mark) => mark.documentId === active && mark.line === line,
+          );
+          if (b) {
+            bookmarkEditing.current = b.id;
+            setAddPath(b.label);
+            setModal("bookmark-label");
+          } else fail("Bookmark this line first.");
+        },
+      },
+      { label: "Previous Bookmark", action: () => bookmarkJump(-1) },
+      { label: "Next Bookmark", action: () => bookmarkJump(1) },
+      { label: "Show Bookmarks", action: () => setModal("bookmarks") },
+      {
+        label: "Refactor → Rename…",
+        action: () => void beginRename(offset),
+        hint: "⇧F6",
+        separator: true,
+      },
+      {
+        label: "Find",
+        action: () => command("find"),
+        hint: "⌘F",
+        separator: true,
+      },
+      { label: "Replace", action: () => command("replace"), hint: "⌘R" },
+      { label: "Find in Files…", action: () => search(), hint: "⇧⌘F" },
+      { label: "Replace in Files…", action: () => search(true), hint: "⇧⌘R" },
+      {
+        label: "Copy File Path",
+        action: () => void navigator.clipboard.writeText(doc?.path || ""),
+      },
+      {
+        label: "Copy Path and Line",
+        action: () =>
+          void navigator.clipboard.writeText(
+            `${doc?.hostId}:${doc?.path}:${(doc?.text.slice(0, capture()?.head ?? 0).match(/\n/g) || []).length + 1}`,
+          ),
+      },
+      { label: "Reveal in Project", action: () => setTreeVisible(true) },
+    ];
+    if (doc?.markdownMode)
+      items.push({
+        label:
+          doc.markdownMode === "preview" ? "Edit Source" : "Preview Markdown",
+        action: () => {
+          doc.markdownMode =
+            doc.markdownMode === "preview" ? "source" : "preview";
+          refresh();
+        },
+      });
+    if (doc?.readonly)
+      for (const item of items)
+        if (
+          [
+            "Undo",
+            "Redo",
+            "Cut",
+            "Paste",
+            "Replace",
+            "Refactor → Rename…",
+          ].includes(item.label)
+        )
+          item.disabled = "This dependency file is read-only";
+    setMenu({
+      x: Math.min(x, window.innerWidth - 292),
+      y: Math.max(5, Math.min(y, window.innerHeight - 690)),
+      items,
+    });
+  }
+  useEffect(() => {
+    const custom = (event: KeyboardEvent) => {
+      if (modal || event.defaultPrevented) return;
+      for (const [id, binding] of Object.entries(settings.shortcuts || {})) {
+        if (binding && matchesBinding(event, binding)) {
+          event.preventDefault();
+          event.stopPropagation();
+          command(id);
+          return;
+        }
+      }
+    };
+    window.addEventListener("keydown", custom, true);
+    return () => window.removeEventListener("keydown", custom, true);
+  }, [settings.shortcuts, modal, doc, roots]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        setMenu(null);
+        return;
+      }
+      if (modal) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.shiftKey && ["f", "r"].includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        search(e.key.toLowerCase() === "r");
+      } else if (mod && e.key === "s") {
+        e.preventDefault();
+        void save();
+      } else if (mod && e.key === "b") {
+        e.preventDefault();
+        void definition();
+      } else if (e.shiftKey && e.key === "F6") {
+        e.preventDefault();
+        void beginRename();
+      } else if (e.altKey && e.key === "F7") {
+        e.preventDefault();
+        void definition(true);
+      } else if (mod && e.key === "[") {
+        e.preventDefault();
+        back();
+      } else if (mod && e.key === "]") {
+        e.preventDefault();
+        forward();
+      } else if (
+        e.altKey &&
+        e.shiftKey &&
+        ["ArrowUp", "ArrowDown"].includes(e.key)
+      ) {
+        e.preventDefault();
+        bookmarkJump(e.key === "ArrowDown" ? 1 : -1);
+      } else if (e.key === "F11") {
+        e.preventDefault();
+        e.shiftKey ? setModal("bookmarks") : bookmark();
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        const id = [...documents.documents.keys()]
+          .reverse()
+          .find((id) => !tabs.includes(id));
+        if (id) {
+          setTabs([...tabs, id]);
+          setActive(id);
+        }
+      } else if (mod && e.key === "w") {
+        e.preventDefault();
+        if (active) close(active);
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [doc, tabs, roots, modal, position]);
+  useEffect(() => {
+    if (!menu) return;
+    document
+      .querySelector<HTMLButtonElement>(".context-menu button:not(:disabled)")
+      ?.focus();
+    const close = (event: PointerEvent) => {
+      if ((event.target as Element)?.closest(".context-menu")) return;
+      setMenu(null);
+    };
+    const key = (e: KeyboardEvent) => {
+      const buttons = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          ".context-menu button:not(:disabled)",
+        ),
+      );
+      const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        buttons[
+          (i + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+            buttons.length
+        ]?.focus();
+      }
+      if (e.key === "Escape") {
+        setMenu(null);
+      }
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", key);
+      const origin = menuOrigin.current;
+      menuOrigin.current = undefined;
+      if (origin && documents.documents.has(origin.documentId)) {
+        editor.current?.focus();
+        editor.current?.restore(origin);
+      }
+    };
+  }, [menu]);
+  useNativeMenu(
+    (id) => {
+      if (id === "settings") {
+        setModal("settings");
+        return;
+      }
+      if (id === "openFile") {
+        void openFile();
+        return;
+      }
+      if (id === "openFolder") {
+        void browseAdd();
+        return;
+      }
+      if (id === "addSSH") {
+        setModal("add-ssh");
+        return;
+      }
+      if (id === "closeWindow") {
+        void import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+          getCurrentWindow().close(),
+        );
+        return;
+      }
+      command(id);
+    },
+    settings.shortcuts,
+    ready,
+    !!doc?.readonly,
+  );
+  const dirty = [...documents.documents.values()].filter((d) => d.dirty);
+  const statuses = [...languages.sessions.values()];
+  return (
+    <div
+      className={`app ${dark ? "dark" : "light"} ${settings.compact ? "compact" : ""}`}
+      style={{ "--ui-scale": settings.uiScale } as React.CSSProperties}
+    >
+      <header className="titlebar" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region>
+          Islet
+        </div>
+        <button
+          className="workspace-switch"
+          onClick={(e) =>
+            setMenu({
+              x: e.clientX,
+              y: 43,
+              items: [
+                { label: "Open File…", action: () => void openFile() },
+                {
+                  label: "Add Local Folder…",
+                  action: () => void browseAdd(),
+                },
+                {
+                  label: "Add SSH Folder…",
+                  action: () => {
+                    setAddPath("");
+                    setAddHost("");
+                    setModal("add-ssh");
+                  },
+                },
+                {
+                  label: "Open Workspace…",
+                  action: async () => {
+                    try {
+                      const path = await request<string | null>("dialog.open", {
+                        filters: [
+                          {
+                            name: "Islet Workspace",
+                            extensions: ["islet-workspace"],
+                          },
+                        ],
+                        multiple: false,
+                      });
+                      if (path) await openManifest(path);
+                    } catch (e) {
+                      fail(e);
+                    }
+                  },
+                },
+                {
+                  label: "Recover Workspace…",
+                  action: () => void showRecoveries(),
+                },
+                {
+                  label: "Save Workspace As…",
+                  action: async () => {
+                    try {
+                      const path: any = await request("dialog.save", {
+                        defaultPath: `${workspaceName}.islet-workspace`,
+                      });
+                      if (path) {
+                        await request("workspace.save", {
+                          path,
+                          value: {
+                            schemaVersion: 1,
+                            id: workspaceId,
+                            name: workspaceName,
+                            roots,
+                          },
+                        });
+                        const saved: any = await request("workspace.load", {
+                          path,
+                        });
+                        setWorkspaceIdentity(saved.manifestPath || path);
+                      }
+                    } catch (e) {
+                      fail(e);
+                    }
+                  },
+                },
+              ],
+            })
+          }
+        >
+          <Folder size={17} />
+          {workspaceName}
+          <ChevronDown size={13} />
+        </button>
+        <div className="titlebar-spacer" data-tauri-drag-region />
+        <button
+          className="icon"
+          title="Find in Files (⇧⌘F)"
+          onClick={() => search()}
+        >
+          <Search size={18} />
+        </button>
+        <button
+          className="icon"
+          title="Settings"
+          onClick={() => setModal("settings")}
+        >
+          <Settings size={18} />
+        </button>
+      </header>
+      <main className="workspace">
+        <aside className="rail">
+          <button
+            className={`icon ${treeVisible ? "active" : ""}`}
+            aria-label="Toggle Project tree"
+            onClick={() => setTreeVisible(!treeVisible)}
+          >
+            <Folder size={21} />
+          </button>
+          <button
+            className="icon"
+            aria-label="Find in Files"
+            onClick={() => search()}
+          >
+            <Search size={20} />
+          </button>
+          <button
+            className="icon"
+            aria-label="Bookmarks"
+            onClick={() => setModal("bookmarks")}
+          >
+            <Bookmark size={18} />
+          </button>
+        </aside>
+        {treeVisible && (
+          <aside className="project-island">
+            <div className="project-header">
+              <strong>Project</strong>
+              <span />
+              <button
+                className="icon small"
+                title="Find in Files"
+                onClick={() => search()}
+              >
+                <Search size={14} />
+              </button>
+              <button
+                className="icon small"
+                title="Add Project/Folder"
+                onClick={() => setModal("add")}
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+            <ProjectTree
+              roots={roots}
+              selected={doc ? doc.hostId + ":" + doc.path : undefined}
+              onOpen={(h, p, preview) => void open(h, p, preview)}
+              onMenu={(e, root, path, folder) =>
+                setMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  items: folder
+                    ? [
+                        {
+                          label: "Find in Files…",
+                          action: () => search(false, { root, path }),
+                        },
+                        {
+                          label: "Replace in Files…",
+                          action: () => search(true, { root, path }),
+                        },
+                        {
+                          label: "Refresh",
+                          action: () => setRoots(roots.map((r) => ({ ...r }))),
+                        },
+                        {
+                          label: "Reconnect",
+                          action: async () => {
+                            try {
+                              await request("remote.connect", {
+                                hostId: root.hostId,
+                              });
+                              setRoots((rs) =>
+                                rs.map((r) =>
+                                  r.id === root.id
+                                    ? { ...r, state: "ready" }
+                                    : r,
+                                ),
+                              );
+                            } catch (e) {
+                              fail(e);
+                            }
+                          },
+                          disabled:
+                            root.hostId === "local"
+                              ? "Local folder"
+                              : undefined,
+                        },
+                        {
+                          label: "Remove Root from Workspace",
+                          action: () => {
+                            if (
+                              [...documents.documents.values()].some(
+                                (d) =>
+                                  d.hostId === root.hostId &&
+                                  (d.path === root.path ||
+                                    d.path.startsWith(
+                                      root.path.replace(/\/$/, "") + "/",
+                                    )) &&
+                                  d.dirty,
+                              )
+                            ) {
+                              fail(
+                                "Save or discard unsaved files in this root before removing it.",
+                              );
+                              return;
+                            }
+                            const detached = tabs.filter((id) => {
+                              const d = documents.documents.get(id);
+                              return !(
+                                d?.hostId === root.hostId &&
+                                d.path.startsWith(root.path + "/")
+                              );
+                            });
+                            setTabs(detached);
+                            if (!detached.includes(active))
+                              setActive(detached[0] || "");
+                            setRoots((rs) =>
+                              rs.filter((r) => r.id !== root.id),
+                            );
+                            void request("root.remove", {
+                              hostId: root.hostId,
+                              id: root.id,
+                              path: root.path,
+                            });
+                          },
+                        },
+                      ]
+                    : [
+                        {
+                          label: "Open File",
+                          action: () => void open(root.hostId, path),
+                        },
+                        {
+                          label: "Copy File Path",
+                          action: () =>
+                            void navigator.clipboard.writeText(path),
+                        },
+                        {
+                          label: "Rename File…",
+                          action: () => {
+                            setAddPath(base(path));
+                            setModal("rename-file");
+                            (window as any).__renameFile = { root, path };
+                          },
+                        },
+                      ],
+                })
+              }
+            />
+            {!roots.length && (
+              <div className="tree-empty">
+                <p>Keep your projects together.</p>
+                <button onClick={browseAdd}>
+                  <Plus size={14} />
+                  Add Folder…
+                </button>
+                <button onClick={() => setModal("add-ssh")}>
+                  Add SSH Folder…
+                </button>
+              </div>
+            )}
+          </aside>
+        )}
+        <section className="editor-island">
+          <div className="tabbar">
+            <div className="navigation-buttons">
+              <button
+                className="icon small"
+                aria-label="Back"
+                disabled={!history.canBack}
+                onClick={back}
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <button
+                className="icon small"
+                aria-label="Forward"
+                disabled={!history.canForward}
+                onClick={forward}
+              >
+                <ArrowRight size={15} />
+              </button>
+            </div>
+            {locations.length > 0 && (
+              <div className="reference-controls">
+                <button
+                  className="icon small"
+                  title="Previous semantic result"
+                  disabled={referenceIndex <= 0}
+                  onClick={() => referenceJump(-1)}
+                >
+                  <ArrowLeft size={12} />
+                </button>
+                <button
+                  className="icon small"
+                  title="Next semantic result"
+                  disabled={referenceIndex >= locations.length - 1}
+                  onClick={() => referenceJump(1)}
+                >
+                  <ArrowRight size={12} />
+                </button>
+                <button
+                  className="icon small"
+                  title="Show semantic results"
+                  onClick={() => setModal("locations")}
+                >
+                  <MoreHorizontal size={13} />
+                </button>
+              </div>
+            )}
+            <div className="tabs">
+              {tabs.map((id) => {
+                const d = documents.documents.get(id);
+                if (!d) return null;
+                return (
+                  <div
+                    key={id}
+                    className={`tab ${active === id ? "active" : ""} ${d.preview ? "preview-tab" : ""}`}
+                    draggable
+                    onDragStart={() => (dragTab.current = id)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => {
+                      const next = tabs.filter((t) => t !== dragTab.current);
+                      next.splice(next.indexOf(id), 0, dragTab.current);
+                      setTabs(next);
+                    }}
+                    onClick={() => {
+                      if (doc) doc.location = capture();
+                      setActive(id);
+                    }}
+                    onDoubleClick={() => {
+                      d.preview = false;
+                      d.pinned = true;
+                      refresh();
+                    }}
+                  >
+                    <FileCode
+                      size={15}
+                      className={
+                        d.path.endsWith(".py") ? "python-icon" : "code-icon"
+                      }
+                    />
+                    <span>{base(d.path)}</span>
+                    {d.hostId !== "local" && (
+                      <small className="host-badge">SSH</small>
+                    )}
+                    {d.pinned && <Pin size={11} />}
+                    <button
+                      aria-label={`Close ${base(d.path)}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        close(id);
+                      }}
+                    >
+                      {d.dirty ? (
+                        <span className="dirty-dot" />
+                      ) : (
+                        <X size={12} />
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {doc ? (
+            <>
+              <div className="breadcrumbs">
+                <span>{ownerOf(roots, doc.hostId, doc.path)?.label}</span>
+                <span>›</span>
+                <span>{doc.path.split("/").slice(-2).join(" › ")}</span>
+                <span className="breadcrumb-host">
+                  {doc.hostId !== "local" ? doc.hostId : ""}
+                </span>
+                {doc.markdownMode && (
+                  <button
+                    className="mode-button"
+                    onClick={() => {
+                      doc.markdownMode =
+                        doc.markdownMode === "preview" ? "source" : "preview";
+                      refresh();
+                    }}
+                  >
+                    {doc.markdownMode === "preview" ? "Edit Source" : "Preview"}
+                  </button>
+                )}
+              </div>
+              {doc.conflict && (
+                <div className="conflict-banner">
+                  <span>
+                    File changed on{" "}
+                    {doc.hostId === "local" ? "disk" : doc.hostId}. Review
+                    before saving.
+                  </span>
+                  <button onClick={() => setModal("conflict")}>
+                    Review conflict…
+                  </button>
+                </div>
+              )}
+              {doc.text.length > 5 * 1024 * 1024 && (
+                <div className="conflict-banner">
+                  Large-file mode · automatic language analysis is paused for
+                  files over 5 MB.
+                </div>
+              )}
+              <div className="editor-area">
+                {doc.markdownMode === "preview" ? (
+                  <Preview
+                    document={doc}
+                    scroll={sourceScroll[doc.id] ?? -1}
+                    onScroll={(value) =>
+                      setSourceScroll((s) => ({ ...s, [doc.id]: value }))
+                    }
+                    fragment={fragment}
+                    onFragmentJump={(scrollTop) => {
+                      const origin = capture();
+                      if (origin)
+                        history.push(origin, { ...origin, scrollTop });
+                      refresh();
+                    }}
+                    onOpen={(h, p, hash) =>
+                      void open(h, p, false, undefined, true, hash)
+                    }
+                    onError={fail}
+                    onBack={back}
+                    onForward={forward}
+                    onSource={() => {
+                      doc.markdownMode = "source";
+                      refresh();
+                    }}
+                  />
+                ) : (
+                  <Editor
+                    key={doc.id}
+                    ref={editor}
+                    document={doc}
+                    settings={{
+                      ...settings,
+                      theme: dark ? "dark" : "light",
+                      tabSize: 4,
+                    }}
+                    languages={
+                      doc.text.length > 5 * 1024 * 1024 ? undefined : languages
+                    }
+                    bookmarks={bookmarks}
+                    onError={fail}
+                    onEdit={(edits) => {
+                      for (const e of edits)
+                        history.map(doc.id, e.from, e.to, e.inserted);
+                    }}
+                    onChange={(text) => {
+                      documents.change(doc.id, text);
+                      doc.preview = false;
+                    }}
+                    onNavigate={(found) => {
+                      if (found.length === 1) void navigate(found[0]);
+                      else {
+                        setLocations(found);
+                        setModal("locations");
+                      }
+                    }}
+                    onContextMenu={(p) => editorMenu(p.x, p.y, p.offset)}
+                    onSelection={(location) => {
+                      doc.location = location;
+                      setPosition(location);
+                    }}
+                    onCommand={command}
+                  />
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="welcome">
+              <div className="welcome-mark">
+                <Folder size={37} />
+              </div>
+              <h1>A quiet place for your code.</h1>
+              <p>
+                Open a folder, or bring local and SSH projects into one
+                workspace.
+              </p>
+              <button className="primary" onClick={browseAdd}>
+                <Folder size={16} />
+                Open Folder…
+              </button>
+              <button
+                onClick={() => {
+                  setAddHost("");
+                  setAddPath("");
+                  setModal("add-ssh");
+                }}
+              >
+                Connect over SSH…
+              </button>
+              <small>⌘⇧F Find in Files · ⌘B Definition · ⇧F6 Rename</small>
+            </div>
+          )}
+        </section>
+      </main>
+      {dirty.length > 0 && (
+        <div className="changes-bar">
+          <span>
+            {dirty.length} unsaved {dirty.length === 1 ? "file" : "files"}
+          </span>
+          <button onClick={() => void saveAll().catch(fail)}>
+            <Save size={13} />
+            Save Changed Files
+          </button>
+          <button
+            onClick={() => void transactions.undo().catch(fail)}
+            disabled={
+              !transactions.transactions.some((t) => t.state === "applied")
+            }
+          >
+            Undo Grouped Edit
+          </button>
+        </div>
+      )}
+      <footer className="statusbar">
+        <button title="Language settings" onClick={() => setModal("settings")}>
+          {doc?.path.endsWith(".py")
+            ? settings.interpreter || "Python · project environment"
+            : doc && /\.[jt]sx?$/.test(doc.path)
+              ? "TypeScript language service"
+              : "Islet"}
+          {statuses.some((s) => s.status === "starting") ? " · indexing…" : ""}
+        </button>
+        <span className="status-spacer" />
+        <span>
+          {doc?.saveState === "uncertain"
+            ? "Save uncertain — reconnect and verify"
+            : doc?.dirty
+              ? doc.hostId === "local"
+                ? "Unsaved"
+                : "Unsaved — " +
+                  (roots.find((r) => r.hostId === doc.hostId)?.state === "ready"
+                    ? "remote"
+                    : "disconnected")
+              : doc?.hostId !== "local" && doc
+                ? "Saved remotely"
+                : ""}
+        </span>
+        <span>
+          {doc && doc.markdownMode !== "preview"
+            ? `${doc.text.slice(0, position?.head ?? 0).split("\n").length}:${(position?.head ?? 0) - (doc.text.lastIndexOf("\n", (position?.head ?? 0) - 1) + 1) + 1}`
+            : ""}
+        </span>
+        <span>{doc?.newline || "LF"}</span>
+        <span>UTF-8</span>
+        <span>4 spaces</span>
+      </footer>
+      {error && (
+        <div className="notification" role="alert">
+          <span>{error}</span>
+          <button
+            className="icon small"
+            aria-label="Dismiss message"
+            onClick={() => setError("")}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      {menu && (
+        <div
+          role="menu"
+          className="context-menu"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 290),
+            top: Math.min(menu.y, window.innerHeight - 100),
+          }}
+        >
+          {menu.items.map((item, i) => (
+            <button
+              key={i}
+              role="menuitem"
+              className={item.separator ? "separator" : ""}
+              disabled={!!item.disabled}
+              title={item.disabled}
+              onClick={() => {
+                item.action();
+                setMenu(null);
+              }}
+            >
+              <span>{item.label}</span>
+              <small>
+                {settings.shortcuts[
+                  Object.keys(shortcuts).find(
+                    (id) => shortcuts[id].label === item.label,
+                  ) || ""
+                ] || item.hint}
+              </small>
+            </button>
+          ))}
+        </div>
+      )}
+      {(modal === "find-files" || modal === "replace-files") && (
+        <SearchDialog
+          roots={roots}
+          documents={documents}
+          transactions={transactions}
+          replace={modal === "replace-files"}
+          initial={searchScope}
+          onClose={() => setModal(null)}
+          onOpen={(h, p, at) => void open(h, p, false, at, true)}
+          onPreview={(preview) => {
+            setTx(preview);
+            setModal("transaction");
+          }}
+        />
+      )}
+      {modal === "rename" && (
+        <Modal title="Rename Symbol" onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <p>
+              Rename the symbol and its semantic usages in the owning language
+              project.
+            </p>
+            <label>
+              New name
+              <input
+                value={rename}
+                onChange={(e) => setRename(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void previewRename();
+                }}
+              />
+            </label>
+            <footer>
+              <button onClick={() => setModal(null)}>Cancel</button>
+              <button className="primary" onClick={previewRename}>
+                Preview Changes
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "transaction" && tx && (
+        <Modal
+          title={tx.label + " · Preview Changes"}
+          onClose={() => setModal(null)}
+          wide
+        >
+          <div className="dialog-body transaction">
+            <p>
+              {tx.files.length} files ·{" "}
+              {tx.files.reduce((n, f) => n + f.edits.length, 0)} occurrences.
+              Changes stay unsaved until you save them.
+            </p>
+            {tx.files.map((file) => (
+              <section key={file.documentId}>
+                <strong>
+                  {file.hostId === "local" ? "Local" : file.hostId} ·{" "}
+                  {file.path}
+                </strong>
+                <div className="diff">
+                  <pre className="removed">{file.before}</pre>
+                  <pre className="added">{file.after}</pre>
+                </div>
+              </section>
+            ))}
+            <footer>
+              <button onClick={() => setModal(null)}>Cancel</button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void transactions
+                    .apply(tx)
+                    .then(() => {
+                      setTabs((t) => [
+                        ...new Set([
+                          ...t,
+                          ...tx.files.map((f) => f.documentId),
+                        ]),
+                      ]);
+                      setModal(null);
+                    })
+                    .catch(fail)
+                }
+              >
+                Apply {tx.label}
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "locations" && (
+        <Modal
+          title="References and Definitions"
+          onClose={() => setModal(null)}
+          wide
+        >
+          <div className="dialog-body location-results">
+            <div className="reference-controls">
+              <button
+                disabled={referenceIndex <= 0}
+                onClick={() => referenceJump(-1)}
+              >
+                Previous Result
+              </button>
+              <button
+                disabled={referenceIndex >= locations.length - 1}
+                onClick={() => referenceJump(1)}
+              >
+                Next Result
+              </button>
+              <span>{locations.length} semantic results</span>
+            </div>
+            {locations.map((location, i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  setReferenceIndex(i);
+                  void navigate(location);
+                  setModal(null);
+                }}
+              >
+                <FileCode size={15} />
+                <span>
+                  {location.hostId === "local" ? "Local" : location.hostId} ·{" "}
+                  {location.path}:{location.range.start.line + 1}
+                  <small className="reference-snippet">
+                    {documents.documents
+                      .get(documentId(location.hostId, location.path))
+                      ?.text.split("\n")[location.range.start.line] ||
+                      "Open to inspect this reference"}
+                  </small>
+                </span>
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
+      {modal === "bookmarks" && (
+        <Modal title="Bookmarks" onClose={() => setModal(null)}>
+          <div className="dialog-body location-results">
+            {!bookmarks.bookmarks.length && (
+              <p>Toggle a line bookmark with ⌘F11 or the editor gutter.</p>
+            )}
+            {bookmarks.bookmarks.map((b) => (
+              <div className="bookmark-row" key={b.id}>
+                <button
+                  disabled={b.unresolved}
+                  onClick={() => {
+                    void open(b.hostId, b.path, false, b.offset, true);
+                    setModal(null);
+                  }}
+                >
+                  <Bookmark size={14} />
+                  <span>
+                    {b.label || base(b.path)}:{b.line + 1}
+                    <small>
+                      {b.hostId} ·{" "}
+                      {b.unresolved ? "Anchor unresolved" : b.context}
+                    </small>
+                  </span>
+                </button>
+                <button
+                  className="icon"
+                  aria-label="Remove bookmark"
+                  onClick={() => {
+                    bookmarks.bookmarks = bookmarks.bookmarks.filter(
+                      (mark) => mark !== b,
+                    );
+                    refresh();
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+      {modal === "recovery" && (
+        <Modal title="Recover Workspace" onClose={() => setModal(null)} wide>
+          <div className="dialog-body location-results">
+            <p>
+              Each record is independent. Recovering opens a new window and
+              preserves the original recovery.
+            </p>
+            {recoveries.length ? (
+              recoveries.map((entry) => (
+                <button
+                  key={entry.key}
+                  onClick={async () => {
+                    try {
+                      const created: any = await request("app.newWindow", {});
+                      await request("cli.deliver", {
+                        operation: "open",
+                        recoveryKey: entry.key,
+                        newWindow: false,
+                        windowId: created.windowId,
+                        requestId: crypto.randomUUID(),
+                      });
+                      setModal(null);
+                    } catch (e) {
+                      fail(e);
+                    }
+                  }}
+                >
+                  <span>
+                    {entry.name} · {entry.dirtyCount || 0} unsaved files
+                    <small className="reference-snippet">
+                      {entry.workspaceIdentity || "Unnamed workspace"} ·{" "}
+                      {new Date(entry.updated).toLocaleString()}
+                    </small>
+                  </span>
+                </button>
+              ))
+            ) : (
+              <p>No earlier recovery records.</p>
+            )}
+          </div>
+        </Modal>
+      )}
+      {modal === "settings" && (
+        <Modal title="Settings" onClose={() => setModal(null)}>
+          <div className="dialog-body settings">
+            <label>
+              Appearance
+              <select
+                value={settings.theme}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    theme: e.target.value as Preferences["theme"],
+                  })
+                }
+              >
+                <option value="dark">Islands Dark</option>
+                <option value="light">Islands Light</option>
+                <option value="system">Follow System</option>
+              </select>
+            </label>
+            <label>
+              Editor font family
+              <input
+                value={settings.fontFamily}
+                onChange={(e) =>
+                  setSettings({ ...settings, fontFamily: e.target.value })
+                }
+              />
+            </label>
+            <div className="input-row">
+              <label>
+                Editor font size
+                <input
+                  type="number"
+                  min="9"
+                  max="32"
+                  value={settings.fontSize}
+                  onChange={(e) =>
+                    setSettings(
+                      validatePreferences({
+                        ...settings,
+                        fontSize: +e.target.value,
+                      }),
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Line spacing
+                <input
+                  type="number"
+                  min="1.1"
+                  max="2.5"
+                  step="0.05"
+                  value={settings.lineHeight}
+                  onChange={(e) =>
+                    setSettings(
+                      validatePreferences({
+                        ...settings,
+                        lineHeight: +e.target.value,
+                      }),
+                    )
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              Interface scale
+              <select
+                value={settings.uiScale}
+                onChange={(e) =>
+                  setSettings({ ...settings, uiScale: +e.target.value })
+                }
+              >
+                <option value="1">100%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+              </select>
+            </label>
+            <div className="check-row">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.ligatures}
+                  onChange={(e) =>
+                    setSettings({ ...settings, ligatures: e.target.checked })
+                  }
+                />
+                Font ligatures
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.compact}
+                  onChange={(e) =>
+                    setSettings({ ...settings, compact: e.target.checked })
+                  }
+                />
+                Compact density
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.wrap}
+                  onChange={(e) =>
+                    setSettings({ ...settings, wrap: e.target.checked })
+                  }
+                />
+                Soft wrap
+              </label>
+            </div>
+            <label>
+              Markdown default
+              <select
+                value={settings.markdownDefault}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    markdownDefault: e.target.value as "preview" | "source",
+                  })
+                }
+              >
+                <option value="preview">Preview</option>
+                <option value="source">Edit Source</option>
+              </select>
+            </label>
+            <label>
+              Python interpreter for current project
+              <input
+                value={settings.interpreter}
+                placeholder="Auto-detect .venv or venv"
+                onChange={(e) =>
+                  setSettings({ ...settings, interpreter: e.target.value })
+                }
+              />
+            </label>
+            <button
+              onClick={() => {
+                const root = doc
+                  ? ownerOf(roots, doc.hostId, doc.path)
+                  : undefined;
+                if (root) {
+                  root.interpreter = settings.interpreter;
+                  setRoots(roots.map((r) => ({ ...r })));
+                  void languages.restart(root.id).catch(fail);
+                }
+              }}
+            >
+              Apply Interpreter and Restart Intelligence
+            </button>
+            <details className="shortcut-settings">
+              <summary>Keyboard shortcuts</summary>
+              <p className="muted">
+                Use Mod for Command on macOS or Control elsewhere, for example
+                Mod-Shift-f. Empty restores the default.
+              </p>
+              {Object.entries(shortcuts).map(([id, shortcut]) => (
+                <label key={id}>
+                  {shortcut.label}
+                  <input
+                    value={settings.shortcuts[id] || ""}
+                    placeholder={shortcut.binding}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      const duplicate = Object.entries(settings.shortcuts).find(
+                        ([other, binding]) =>
+                          other !== id && value && binding === value,
+                      );
+                      if (duplicate) {
+                        fail(
+                          `Shortcut already used by ${shortcuts[duplicate[0]]?.label || duplicate[0]}`,
+                        );
+                        return;
+                      }
+                      setSettings({
+                        ...settings,
+                        shortcuts: { ...settings.shortcuts, [id]: value },
+                      });
+                    }}
+                  />
+                </label>
+              ))}
+            </details>
+            <p className="muted">
+              Inter and JetBrains Mono are bundled. Workspace TypeScript and
+              plugins are disabled.
+            </p>
+            <footer>
+              <button
+                onClick={() =>
+                  void request("app.installCli", {})
+                    .then(() => setError("CLI launcher installed."))
+                    .catch(fail)
+                }
+              >
+                Install islet CLI…
+              </button>
+              <button className="primary" onClick={() => setModal(null)}>
+                Done
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {(modal === "add" || modal === "add-ssh") && (
+        <AddFolderDialog
+          remote={modal === "add-ssh"}
+          onClose={() => setModal(null)}
+          onAdd={addRoot}
+          onError={fail}
+        />
+      )}
+      {modal === "close-window" && (
+        <Modal title="Close Workspace" onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <p>
+              This workspace has unsaved files. Save them or retain recovery
+              buffers before closing.
+            </p>
+            <footer>
+              <button onClick={() => setModal(null)}>Cancel</button>
+              <button onClick={() => void closeNative(false)}>
+                Keep Recovery and Close
+              </button>
+              <button
+                className="primary"
+                onClick={() => void closeNative(true)}
+              >
+                Save All and Close
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "close" && pendingClose && (
+        <Modal title="Unsaved Changes" onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <p>
+              Save changes to {base(documents.require(pendingClose).path)}{" "}
+              before closing?
+            </p>
+            <footer>
+              <button onClick={() => setModal(null)}>Cancel</button>
+              <button onClick={() => close(pendingClose, true)}>
+                Discard and Close
+              </button>
+              <button
+                className="primary"
+                onClick={() =>
+                  void documents
+                    .save(pendingClose)
+                    .then(() => close(pendingClose, true))
+                    .catch(fail)
+                }
+              >
+                Save and Close
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "conflict" && doc?.conflict && (
+        <Modal
+          title="Resolve File Conflict"
+          onClose={() => setModal(null)}
+          wide
+        >
+          <div className="dialog-body">
+            <p>
+              Your buffer and the file on {doc.hostId} differ. Review both
+              before choosing.
+            </p>
+            <div className="diff">
+              <pre>{doc.text}</pre>
+              <pre>{doc.conflict.text}</pre>
+            </div>
+            <footer>
+              <button onClick={() => setModal(null)}>Keep Reviewing</button>
+              <button
+                onClick={() => {
+                  documents.resolveConflict(doc.id, "reload");
+                  setModal(null);
+                }}
+              >
+                Reload Disk Version
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  documents.resolveConflict(doc.id, "keep");
+                  setModal(null);
+                }}
+              >
+                Keep My Buffer for Next Save
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "bookmark-label" && doc && (
+        <Modal title="Bookmark Label" onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <label>
+              Label
+              <input
+                value={addPath}
+                onChange={(e) => setAddPath(e.target.value)}
+              />
+            </label>
+            <footer>
+              <button
+                className="primary"
+                onClick={() => {
+                  const mark = bookmarks.bookmarks.find(
+                    (mark) => mark.id === bookmarkEditing.current,
+                  );
+                  if (mark) {
+                    mark.label = addPath;
+                    refresh();
+                  }
+                  setModal(null);
+                }}
+              >
+                Save Label
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {modal === "rename-file" && (
+        <Modal title="Rename File" onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <label>
+              File name
+              <input
+                value={addPath}
+                onChange={(e) => setAddPath(e.target.value)}
+              />
+            </label>
+            <footer>
+              <button onClick={() => setModal(null)}>Cancel</button>
+              <button
+                className="primary"
+                onClick={async () => {
+                  const { root, path } = (window as any).__renameFile;
+                  try {
+                    if (!addPath || addPath.includes("/"))
+                      throw Error("Enter a file name without slashes.");
+                    const id = documentId(root.hostId, path);
+                    if (documents.documents.get(id)?.dirty)
+                      throw Error("Save this file before renaming it.");
+                    const newPath =
+                      path.slice(0, path.lastIndexOf("/") + 1) + addPath;
+                    await request("fs.rename", {
+                      hostId: root.hostId,
+                      path,
+                      newPath,
+                    });
+                    const newId = documentId(root.hostId, newPath);
+                    const existing = documents.documents.get(id);
+                    if (existing) {
+                      migrateEditorState(id, newId);
+                      documents.documents.delete(id);
+                      existing.id = newId;
+                      existing.path = newPath;
+                      if (existing.location) {
+                        existing.location.documentId = newId;
+                        existing.location.path = newPath;
+                      }
+                      documents.documents.set(newId, existing);
+                      setTabs((ts) => ts.map((t) => (t === id ? newId : t)));
+                      if (active === id) setActive(newId);
+                    }
+                    for (const mark of bookmarks.bookmarks)
+                      if (mark.documentId === id) {
+                        mark.documentId = newId;
+                        mark.path = newPath;
+                      }
+                    for (const entry of history.entries)
+                      if (entry.documentId === id) {
+                        entry.documentId = newId;
+                        entry.path = newPath;
+                      }
+                    await languages.restart(root.id);
+                    setRoots(roots.map((r) => ({ ...r })));
+                    refresh();
+                    setModal(null);
+                  } catch (e) {
+                    fail(e);
+                  }
+                }}
+              >
+                Rename File
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+      {auth && (
+        <Modal
+          title={`SSH · ${auth.hostId}`}
+          onClose={() => {
+            void request("remote.respond", {
+              promptId: auth.promptId,
+              response: "",
+            });
+            setAuth(null);
+          }}
+        >
+          <div className="dialog-body">
+            <p>{auth.prompt}</p>
+            <label>
+              {auth.secret ? "Password / passphrase" : "Response"}
+              <input
+                type={auth.secret ? "password" : "text"}
+                value={authResponse}
+                onChange={(e) => setAuthResponse(e.target.value)}
+                autoComplete="off"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    void request("remote.respond", {
+                      promptId: auth.promptId,
+                      response: authResponse,
+                    });
+                    setAuth(null);
+                    setAuthResponse("");
+                  }
+                }}
+              />
+            </label>
+            <footer>
+              <button
+                onClick={() => {
+                  void request("remote.respond", {
+                    promptId: auth.promptId,
+                    response: "",
+                  });
+                  setAuth(null);
+                  setAuthResponse("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  void request("remote.respond", {
+                    promptId: auth.promptId,
+                    response: authResponse,
+                  });
+                  setAuth(null);
+                  setAuthResponse("");
+                }}
+              >
+                Continue
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}

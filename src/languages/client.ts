@@ -1,0 +1,627 @@
+import type { DocumentStore } from "../core/documents";
+import { request, onHostEvent, type Request } from "../core/bridge";
+import {
+  fileUri,
+  uriPath,
+  positionAt,
+  ownerOf,
+  type Root,
+  type DocumentModel,
+  type Position,
+  type Range,
+} from "../core/types";
+export interface LanguageLocation {
+  hostId: string;
+  path: string;
+  range: Range;
+}
+export interface LspDiagnostic {
+  range: Range;
+  message: string;
+  severity?: number;
+  source?: string;
+}
+export interface LanguageState {
+  sessionId: string;
+  root: Root;
+  language: string;
+  capabilities: any;
+  status: "starting" | "ready" | "failed";
+  error?: string;
+}
+interface Session extends LanguageState {
+  nextId: number;
+  pending: Map<
+    number,
+    {
+      resolve: (r: any) => void;
+      reject: (e: any) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
+  opened: Map<string, number>;
+  ready?: Promise<void>;
+}
+export class LanguageManager {
+  clientId: string = crypto.randomUUID();
+  sessions = new Map<string, Session>();
+  roots: Root[] = [];
+  diagnostics = new Map<string, LspDiagnostic[]>();
+  private listeners = new Set<() => void>();
+  private unsubscribe?: () => void;
+  documents?: DocumentStore;
+  private connecting?: Promise<void>;
+  private starting = new Map<string, Promise<Session | undefined>>();
+  constructor(public transport: Request = request) {}
+  subscribe = (fn: () => void) => {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  };
+  emit = () => this.listeners.forEach((fn) => fn());
+  async connect() {
+    if (this.unsubscribe) return;
+    if (!this.connecting)
+      this.connecting = (async () => {
+        const offMessage = await onHostEvent("lsp-message", (event) =>
+          this.receive(event),
+        );
+        const offStatus = await onHostEvent("host-event", (event) => {
+          const affected = [...this.sessions.entries()].filter(([, session]) =>
+            event.type === "language-exit"
+              ? session.sessionId === event.sessionId
+              : event.type === "connection" &&
+                event.state !== "ready" &&
+                session.root.hostId === event.hostId,
+          );
+          for (const [key, session] of affected) {
+            session.status = "failed";
+            session.error =
+              event.message || event.error || "Connection changed";
+            for (const pending of session.pending.values()) {
+              clearTimeout(pending.timer);
+              pending.reject(new Error(session.error));
+            }
+            session.pending.clear();
+            this.starting.delete(key);
+            this.sessions.delete(key);
+          }
+          if (affected.length) this.emit();
+        });
+        this.unsubscribe = () => {
+          offMessage();
+          offStatus();
+        };
+      })();
+    await this.connecting;
+  }
+  receive(event: any) {
+    const session = [...this.sessions.values()].find(
+      (s) => s.sessionId === event.sessionId,
+    );
+    if (!session) return;
+    const message = event.message;
+    if (message?.id != null && ("result" in message || "error" in message)) {
+      const pending = session.pending.get(message.id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        session.pending.delete(message.id);
+        message.error
+          ? pending.reject(new Error(message.error.message))
+          : pending.resolve(message.result);
+      }
+    } else if (message?.method === "textDocument/publishDiagnostics") {
+      const params = message.params,
+        opened = session.opened.get(params.uri);
+      if (params.version != null && opened != null && params.version !== opened)
+        return;
+      this.diagnostics.set(
+        JSON.stringify([session.root.hostId, uriPath(params.uri)]),
+        params.diagnostics || [],
+      );
+      this.emit();
+    } else if (message?.id != null) {
+      const settings = this.configuration(session);
+      const result =
+        message.method === "workspace/configuration"
+          ? message.params.items.map((item: any) =>
+              item.section
+                ? (item.section
+                    .split(".")
+                    .reduce(
+                      (value: any, key: string) => value?.[key],
+                      settings,
+                    ) ?? null)
+                : settings,
+            )
+          : message.method === "workspace/workspaceFolders"
+            ? [{ uri: fileUri(session.root.path), name: session.root.label }]
+            : null;
+      void this.send(session, { jsonrpc: "2.0", id: message.id, result }).catch(
+        () => {},
+      );
+    }
+  }
+  private configuration(session: Session) {
+    const projectPaths = [
+      ...new Set([
+        session.root.path,
+        ...[...session.opened.keys()]
+          .map((uri) => uriPath(uri).slice(0, uriPath(uri).lastIndexOf("/")))
+          .filter(
+            (path) =>
+              path === session.root.path ||
+              path.startsWith(session.root.path + "/"),
+          ),
+      ]),
+    ];
+    return {
+      python: {
+        pythonPath: session.root.interpreter,
+        analysis: {
+          typeCheckingMode: "basic",
+          diagnosticMode: "openFilesOnly",
+          autoSearchPaths: true,
+          extraPaths: projectPaths,
+        },
+      },
+      basedpyright: {
+        analysis: {
+          typeCheckingMode: "basic",
+          diagnosticMode: "openFilesOnly",
+          autoSearchPaths: true,
+          extraPaths: projectPaths,
+        },
+      },
+      typescript: { preferences: { includePackageJsonAutoImports: "on" } },
+      javascript: { preferences: { includePackageJsonAutoImports: "on" } },
+    };
+  }
+  private send(s: Session, message: any) {
+    return this.transport("lsp.send", { sessionId: s.sessionId, message });
+  }
+  private rpc(
+    s: Session,
+    method: string,
+    params: any,
+    signal?: AbortSignal,
+  ): Promise<any> {
+    const id = ++s.nextId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        s.pending.delete(id);
+        void this.send(s, {
+          jsonrpc: "2.0",
+          method: "$/cancelRequest",
+          params: { id },
+        }).catch(() => {});
+        reject(new Error("Language request timed out"));
+      }, 20000);
+      s.pending.set(id, { resolve, reject, timer });
+      if (signal) {
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            s.pending.delete(id);
+            void this.send(s, {
+              jsonrpc: "2.0",
+              method: "$/cancelRequest",
+              params: { id },
+            }).catch(() => {});
+            reject(new DOMException("Canceled", "AbortError"));
+          },
+          { once: true },
+        );
+      }
+      this.send(s, { jsonrpc: "2.0", id, method, params }).catch((e) => {
+        clearTimeout(timer);
+        s.pending.delete(id);
+        reject(e);
+      });
+    });
+  }
+  async ensure(
+    root: Root,
+    document?: DocumentModel,
+  ): Promise<Session | undefined> {
+    const language = document ? languageFor(document.path) : "python";
+    if (!language) return;
+    const key = JSON.stringify([
+      root.hostId,
+      root.id,
+      language,
+      root.interpreter || "",
+    ]);
+    let pending = this.starting.get(key);
+    if (!pending) {
+      pending = this.createSession(root, document);
+      this.starting.set(key, pending);
+      pending.catch(() => this.starting.delete(key));
+    }
+    const session = await pending;
+    if (session && document) await this.sync(session, document);
+    return session;
+  }
+  private async createSession(
+    root: Root,
+    document?: DocumentModel,
+  ): Promise<Session | undefined> {
+    const language = document ? languageFor(document.path) : "python";
+    if (!language) return;
+    await this.connect();
+    const key = JSON.stringify([
+      root.hostId,
+      root.id,
+      language,
+      root.interpreter || "",
+    ]);
+    let session = this.sessions.get(key);
+    if (!session) {
+      const start = await this.transport("lsp.start", {
+        root,
+        language,
+        interpreter: root.interpreter,
+        clientId: this.clientId,
+      });
+      session = {
+        sessionId: start.sessionId,
+        root: { ...root, interpreter: root.interpreter || start.interpreter },
+        language,
+        capabilities: {},
+        status: "starting",
+        nextId: 0,
+        pending: new Map(),
+        opened: new Map(),
+      };
+      this.sessions.set(key, session);
+      const current = session;
+      session.ready = (async () => {
+        try {
+          const result = await this.rpc(
+            current,
+            "initialize",
+            initializeParams(current.root),
+          );
+          current.capabilities = result.capabilities || {};
+          await this.send(current, {
+            jsonrpc: "2.0",
+            method: "initialized",
+            params: {},
+          });
+          await this.send(current, {
+            jsonrpc: "2.0",
+            method: "workspace/didChangeConfiguration",
+            params: {
+              settings: {
+                python: {
+                  pythonPath: current.root.interpreter,
+                  analysis: {
+                    typeCheckingMode: "basic",
+                    diagnosticMode: "openFilesOnly",
+                  },
+                },
+                basedpyright: {
+                  analysis: {
+                    typeCheckingMode: "basic",
+                    diagnosticMode: "openFilesOnly",
+                  },
+                },
+                typescript: {
+                  preferences: { includePackageJsonAutoImports: "on" },
+                },
+                javascript: {
+                  preferences: { includePackageJsonAutoImports: "on" },
+                },
+              },
+            },
+          });
+          current.status = "ready";
+        } catch (error) {
+          current.status = "failed";
+          current.error = String(error);
+          throw error;
+        } finally {
+          this.emit();
+        }
+      })();
+    }
+    await session.ready;
+    if (document) await this.sync(session, document);
+    return session;
+  }
+  async sync(s: Session, d: DocumentModel) {
+    const uri = fileUri(d.path),
+      version = s.opened.get(uri);
+    if (version == null) {
+      s.opened.set(uri, d.version);
+      await this.send(s, {
+        jsonrpc: "2.0",
+        method: "textDocument/didOpen",
+        params: {
+          textDocument: {
+            uri,
+            languageId: languageId(d.path),
+            version: d.version,
+            text: d.text,
+          },
+        },
+      });
+      s.opened.set(uri, d.version);
+      await this.send(s, {
+        jsonrpc: "2.0",
+        method: "workspace/didChangeConfiguration",
+        params: { settings: this.configuration(s) },
+      });
+    } else if (version !== d.version) {
+      s.opened.set(uri, d.version);
+      await this.send(s, {
+        jsonrpc: "2.0",
+        method: "textDocument/didChange",
+        params: {
+          textDocument: { uri, version: d.version },
+          contentChanges: [{ text: d.text }],
+        },
+      });
+      s.opened.set(uri, d.version);
+    }
+  }
+  async request(
+    document: DocumentModel,
+    method: string,
+    position?: Position | number,
+    extra: any = {},
+    signal?: AbortSignal,
+  ): Promise<any> {
+    const root = ownerOf(this.roots, document.hostId, document.path);
+    if (!root) throw new Error("This document has no owning language project");
+    const version = document.version;
+    const s = await this.ensure(root, document);
+    if (!s)
+      throw new Error(
+        "Language intelligence is available for Python and JavaScript/TypeScript",
+      );
+    const result = await this.rpc(
+      s,
+      method,
+      {
+        textDocument: { uri: fileUri(document.path) },
+        ...(position == null
+          ? {}
+          : {
+              position:
+                typeof position === "number"
+                  ? positionAt(document.text, position)
+                  : position,
+            }),
+        ...extra,
+      },
+      signal,
+    );
+    if (document.version !== version)
+      throw new Error("Language result is stale; try again");
+    return result;
+  }
+  async locations(
+    doc: DocumentModel,
+    method: string,
+    offset: number,
+  ): Promise<LanguageLocation[]> {
+    const value = await this.request(
+      doc,
+      method,
+      offset,
+      method.includes("references")
+        ? { context: { includeDeclaration: true } }
+        : {},
+    );
+    const values = Array.isArray(value) ? value : value ? [value] : [];
+    return values.map((v) => ({
+      hostId: doc.hostId,
+      path: uriPath(v.targetUri || v.uri),
+      range: v.targetSelectionRange || v.targetRange || v.range,
+    }));
+  }
+  async definition(doc: DocumentModel, offset: number) {
+    let results = await this.locations(doc, "textDocument/definition", offset);
+    if (results.length === 1 && results[0].path === doc.path) {
+      const r = results[0].range,
+        p = positionAt(doc.text, offset);
+      if (
+        p.line >= r.start.line &&
+        p.line <= r.end.line &&
+        p.character >= r.start.character &&
+        p.character <= r.end.character
+      )
+        results = await this.references(doc, offset);
+    }
+    return results;
+  }
+  references(doc: DocumentModel, offset: number) {
+    return this.locations(doc, "textDocument/references", offset);
+  }
+  prepareRename(doc: DocumentModel, offset: number) {
+    return this.request(doc, "textDocument/prepareRename", offset);
+  }
+  async rename(doc: DocumentModel, offset: number, newName: string) {
+    const owning = ownerOf(this.roots, doc.hostId, doc.path);
+    const participants = [
+      ...(this.documents?.documents.values() || [doc]),
+    ].filter(
+      (d) =>
+        d.hostId === doc.hostId &&
+        languageFor(d.path) === languageFor(doc.path) &&
+        ownerOf(this.roots, d.hostId, d.path)?.id === owning?.id,
+    );
+    const before = participants.map((document) => ({
+      document,
+      version: document.version,
+      text: document.text,
+    }));
+    for (const item of before)
+      if (owning) await this.ensure(owning, item.document);
+    const result = await this.request(doc, "textDocument/rename", offset, {
+      newName,
+    });
+    for (const item of before)
+      if (
+        item.document.version !== item.version ||
+        item.document.text !== item.text
+      )
+        throw new Error(
+          "Rename preview is stale; an open document changed during analysis",
+        );
+    return result;
+  }
+  symbols(doc: DocumentModel) {
+    return this.request(doc, "textDocument/documentSymbol");
+  }
+  async semanticTokens(doc: DocumentModel) {
+    const root = ownerOf(this.roots, doc.hostId, doc.path);
+    if (!root) return;
+    const s = await this.ensure(root, doc);
+    if (!s?.capabilities.semanticTokensProvider) return;
+    const version = doc.version,
+      result = await this.request(doc, "textDocument/semanticTokens/full");
+    return {
+      version,
+      data: result?.data || [],
+      legend: s.capabilities.semanticTokensProvider.legend,
+    };
+  }
+  async close() {
+    for (const s of this.sessions.values()) {
+      for (const p of s.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error("Workspace closed"));
+      }
+      try {
+        await this.transport("lsp.stop", { sessionId: s.sessionId });
+      } catch {}
+    }
+    this.sessions.clear();
+    this.starting.clear();
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+    this.connecting = undefined;
+  }
+  async restart(rootId?: string) {
+    for (const [key, s] of this.sessions) {
+      if (!rootId || s.root.id === rootId) {
+        await this.transport("lsp.stop", { sessionId: s.sessionId });
+        this.sessions.delete(key);
+        this.starting.delete(key);
+      }
+    }
+    this.emit();
+  }
+}
+export function languageFor(path: string) {
+  return /\.pyi?$/.test(path)
+    ? "python"
+    : /\.(?:[cm]?[jt]s|[jt]sx)$/.test(path)
+      ? "javascript"
+      : undefined;
+}
+export function languageId(path: string) {
+  return /\.pyi?$/.test(path)
+    ? "python"
+    : /\.tsx$/.test(path)
+      ? "typescriptreact"
+      : /\.jsx$/.test(path)
+        ? "javascriptreact"
+        : /\.[cm]?ts$/.test(path)
+          ? "typescript"
+          : "javascript";
+}
+
+function initializeParams(root: Root) {
+  return {
+    processId: null,
+    rootUri: fileUri(root.path),
+    workspaceFolders: [{ uri: fileUri(root.path), name: root.label }],
+    capabilities: {
+      workspace: {
+        configuration: true,
+        workspaceFolders: true,
+        workspaceEdit: { documentChanges: true, resourceOperations: [] },
+      },
+      general: { positionEncodings: ["utf-16"] },
+      textDocument: {
+        synchronization: { didSave: true },
+        completion: {
+          completionItem: {
+            snippetSupport: false,
+            documentationFormat: ["markdown", "plaintext"],
+            resolveSupport: {
+              properties: ["documentation", "detail", "additionalTextEdits"],
+            },
+          },
+        },
+        hover: { contentFormat: ["markdown", "plaintext"] },
+        signatureHelp: {
+          signatureInformation: {
+            documentationFormat: ["plaintext"],
+            parameterInformation: { labelOffsetSupport: true },
+          },
+        },
+        definition: { linkSupport: true },
+        references: {},
+        documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+        rename: { prepareSupport: true },
+        publishDiagnostics: { versionSupport: true },
+        semanticTokens: {
+          requests: { full: true },
+          tokenTypes: [
+            "namespace",
+            "type",
+            "class",
+            "enum",
+            "interface",
+            "struct",
+            "typeParameter",
+            "parameter",
+            "variable",
+            "property",
+            "enumMember",
+            "event",
+            "function",
+            "method",
+            "macro",
+            "keyword",
+            "modifier",
+            "comment",
+            "string",
+            "number",
+            "regexp",
+            "operator",
+            "decorator",
+          ],
+          tokenModifiers: [
+            "declaration",
+            "definition",
+            "readonly",
+            "static",
+            "deprecated",
+            "abstract",
+            "async",
+            "modification",
+            "documentation",
+            "defaultLibrary",
+          ],
+          formats: ["relative"],
+          overlappingTokenSupport: false,
+          multilineTokenSupport: false,
+        },
+      },
+    },
+    initializationOptions: {
+      preferences: {
+        includeCompletionsForModuleExports: true,
+        includeCompletionsWithInsertText: true,
+      },
+      hostInfo: "islet",
+    },
+  };
+}

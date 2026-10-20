@@ -1,0 +1,26 @@
+# Dependencies, toolchains, caches and generated builds
+node_modules/
+dist/
+.tools/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/runtime/
+src-tauri/resources/remote/
+*.tsbuildinfo
+release-artifacts/
+release/
+test-results/
+playwright-report/
+
+# Machine-specific verification artifacts and logs
+design/validation/
+*.log
+*.pid
+.DS_Store
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
