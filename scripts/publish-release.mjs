@@ -16,64 +16,46 @@ if (repo !== "saadqc/Islet" || tag !== `v${version}`)
     "Publishing requires the matching version tag in saadqc/Islet.",
   );
 const directory = path.join(root, "release-artifacts");
-const names = ["arm64", "x64"].flatMap((arch) => [
-  ...["zip", "dmg", "json"].map(
-    (ext) => `Islet_${version}_macos_${arch}.${ext}`,
-  ),
-  `SHA256SUMS_macos_${arch}.txt`,
-]);
+const imageName = `Islet_${version}_macos_arm64.dmg`;
 const digest = (bytes) =>
   crypto.createHash("sha256").update(bytes).digest("hex");
-for (const arch of ["arm64", "x64"]) {
-  const metadata = JSON.parse(
-    await fs.readFile(
-      path.join(directory, `Islet_${version}_macos_${arch}.json`),
-      "utf8",
-    ),
-  );
-  if (
-    metadata.version !== version ||
-    metadata.arch !== arch ||
-    metadata.platform !== "macos" ||
-    metadata.commit !== process.env.GITHUB_SHA ||
-    !metadata.signing?.verified ||
-    metadata.signing.notarized !== false ||
-    ![
-      "zipExtracted",
-      "dmgVerified",
-      "dmgMounted",
-      "codeSignatureVerified",
-      "runtimeExecuted",
-    ].every((key) => metadata.validation?.[key] === true)
-  )
-    throw new Error(`Invalid release metadata for ${arch}.`);
-  for (const ext of ["zip", "dmg"]) {
-    const name = `Islet_${version}_macos_${arch}.${ext}`;
-    const expected = metadata.artifacts.find((item) => item.name === name);
-    const bytes = await fs.readFile(path.join(directory, name));
-    if (
-      !expected ||
-      expected.bytes !== bytes.length ||
-      expected.sha256 !== digest(bytes)
-    )
-      throw new Error(`Artifact differs from package validation: ${name}`);
-  }
-}
-const expected = new Map();
-const sums = [];
-for (const name of names.sort()) {
-  const bytes = await fs.readFile(path.join(directory, name));
-  if (!bytes.length) throw new Error(`Empty release asset: ${name}`);
-  expected.set(name, { bytes: bytes.length, sha256: digest(bytes) });
-  sums.push(`${digest(bytes)}  ${name}`);
-}
+const metadata = JSON.parse(
+  await fs.readFile(
+    path.join(directory, `Islet_${version}_macos_arm64.json`),
+    "utf8",
+  ),
+);
+if (
+  metadata.version !== version ||
+  metadata.arch !== "arm64" ||
+  metadata.platform !== "macos" ||
+  metadata.commit !== process.env.GITHUB_SHA ||
+  metadata.signing?.verified !== true ||
+  metadata.signing.notarized !== false ||
+  ![
+    "dmgVerified",
+    "dmgMounted",
+    "codeSignatureVerified",
+    "runtimeExecuted",
+  ].every((key) => metadata.validation?.[key] === true)
+)
+  throw new Error("Invalid Apple silicon release validation metadata.");
+const image = await fs.readFile(path.join(directory, imageName));
+const validated = metadata.artifacts?.find((item) => item.name === imageName);
+if (
+  metadata.artifacts.length !== 1 ||
+  !validated ||
+  validated.bytes !== image.length ||
+  validated.sha256 !== digest(image)
+)
+  throw new Error("The DMG differs from package validation.");
 const checksumName = "SHA256SUMS.txt";
-const checksumBytes = Buffer.from(sums.join("\n") + "\n");
-await fs.writeFile(path.join(directory, checksumName), checksumBytes);
-expected.set(checksumName, {
-  bytes: checksumBytes.length,
-  sha256: digest(checksumBytes),
-});
+const checksum = Buffer.from(`${digest(image)}  ${imageName}\n`);
+await fs.writeFile(path.join(directory, checksumName), checksum);
+const expected = new Map([
+  [imageName, { bytes: image.length, sha256: digest(image) }],
+  [checksumName, { bytes: checksum.length, sha256: digest(checksum) }],
+]);
 const gh = (args) =>
   exec("gh", [...args, "--repo", repo], { maxBuffer: 4 * 1024 * 1024 });
 const inspect = async () =>
@@ -109,7 +91,7 @@ try {
 }
 if (!release.isDraft && !release.isPrerelease)
   throw new Error("Refusing to replace a stable published release.");
-// An interrupted draft can be resumed. A published prerelease must already match exactly.
+// Resume an interrupted draft; an already published prerelease must match exactly.
 if (release.isDraft)
   await gh([
     "release",

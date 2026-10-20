@@ -6,7 +6,7 @@ This is a functional preview implementation. The [validation record](docs/VALIDA
 
 ## Run
 
-Download the Apple silicon (`arm64`) or Intel (`x64`) ZIP/DMG from [Releases](https://github.com/saadqc/Islet/releases). macOS 13.5 or newer is required. The preview is ad-hoc signed and not notarized; Gatekeeper may require explicit approval. See [release details](docs/RELEASE.md) for checksums and build gates.
+Download the Apple silicon (`arm64`) DMG from [Releases](https://github.com/saadqc/Islet/releases). An Apple silicon Mac with macOS 13.5 or newer is required. The preview is ad-hoc signed and not notarized; Gatekeeper may require explicit approval. See [release details](docs/RELEASE.md) for checksums and build gates.
 
 To use a locally built preview, open `src-tauri/target/release/bundle/macos/Islet.app`. It includes its own runtime and language services; Node and Rust are needed only for development.
 

@@ -49,20 +49,10 @@ jobs:
           npm run test:ui
 
   build:
-    name: Build macOS ${{ matrix.arch }}
+    name: Build Apple silicon DMG
     needs: verify
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            arch: x64
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,13 +62,13 @@ jobs:
           cache: npm
       - name: Native architecture guard
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ARCH: arm64
         run: node -e 'if(process.platform!=="darwin"||process.arch!==process.env.EXPECTED_ARCH)throw new Error("Runner architecture does not match the release target")'
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable action, pinned Rust below
         with:
           toolchain: 1.99.1
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
           components: rustfmt
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -86,7 +76,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: macos-${{ matrix.arch }}-rust-1.99.1-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: macos-arm64-rust-1.99.1-${{ hashFiles('src-tauri/Cargo.lock') }}
       - run: npm ci
       - run: mkdir -p design/validation
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -100,7 +90,7 @@ jobs:
           npm run runtime:remote -- arm64
       - name: Build the native app from lockfiles
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ARCH: arm64
         run: npx tauri build --bundles app --ci -- --locked
       - name: Ad-hoc sign and verify preview
         run: node scripts/sign-preview.mjs
@@ -108,13 +98,13 @@ jobs:
         run: npm run test:package
       - name: Verify exact source, frontend and bundled resources
         run: node scripts/verify-package.mjs
-      - name: Create architecture-specific ZIP, DMG and metadata
+      - name: Create Apple silicon DMG and validation metadata
         env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ARCH: arm64
         run: node scripts/package-release.mjs --out-dir release-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: islet-macos-${{ matrix.arch }}
+          name: islet-macos-arm64
           path: release-artifacts/*
           retention-days: 14
           if-no-files-found: error
@@ -134,10 +124,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: islet-macos-*
+          name: islet-macos-arm64
           path: release-artifacts
-          merge-multiple: true
-      - name: Publish only after both architectures and every asset are verified
+      - name: Publish only after the Apple silicon DMG is verified
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/publish-release.mjs

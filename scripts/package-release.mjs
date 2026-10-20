@@ -24,18 +24,19 @@ export function compareVersions(left, right) {
   }
   return 0;
 }
-export function releaseNames(version, arch) {
+export function releaseNames(version, arch = "arm64") {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version))
     throw new Error("Expected a semantic release version without a leading v.");
-  if (!["arm64", "x64"].includes(arch))
-    throw new Error("Mac release architecture must be arm64 or x64.");
+  if (arch !== "arm64")
+    throw new Error(
+      "Islet installers are available for Apple silicon (arm64) only.",
+    );
   const base = `Islet_${version}_macos_${arch}`;
   return {
     base,
-    zip: base + ".zip",
     dmg: base + ".dmg",
     metadata: base + ".json",
-    checksums: `SHA256SUMS_macos_${arch}.txt`,
+    checksums: "SHA256SUMS.txt",
   };
 }
 export function parsePackageArgs(args) {
@@ -70,6 +71,10 @@ export function validateReleaseIdentity({
     !/^\d+(?:\.\d+){0,2}$/.test(nodeMinimumVersion)
   )
     throw new Error("Invalid minimum macOS version.");
+  if (requestedArch !== "arm64")
+    throw new Error(
+      "Islet installers are available for Apple silicon (arm64) only.",
+    );
   if (
     appArch !== requestedArch ||
     nodeArch !== requestedArch ||
@@ -270,26 +275,10 @@ export async function packageRelease(options = {}) {
   const temporary = await fs.mkdtemp(
     path.join(root, ".tools/release-package-"),
   );
-  const zip = path.join(outDir, "." + crypto.randomUUID() + ".zip"),
-    dmg = path.join(outDir, "." + crypto.randomUUID() + ".dmg");
+  const dmg = path.join(outDir, "." + crypto.randomUUID() + ".dmg");
   let mounted = false;
   const mount = path.join(temporary, "mount");
   try {
-    await exec("/usr/bin/ditto", [
-      "-c",
-      "-k",
-      "--sequesterRsrc",
-      "--keepParent",
-      app,
-      zip,
-    ]);
-    const unpacked = path.join(temporary, "unpacked");
-    await fs.mkdir(unpacked);
-    await exec("/usr/bin/ditto", ["-x", "-k", zip, unpacked]);
-    await verifyExtracted(path.join(unpacked, path.basename(app)), {
-      arch,
-      version,
-    });
     const disk = path.join(temporary, "disk");
     await fs.mkdir(disk);
     await exec("/usr/bin/ditto", [app, path.join(disk, "Islet.app")]);
@@ -339,10 +328,7 @@ export async function packageRelease(options = {}) {
     await detachImage(mount);
     mounted = false;
     const artifacts = [];
-    for (const [temporaryFile, name] of [
-      [zip, names.zip],
-      [dmg, names.dmg],
-    ]) {
+    for (const [temporaryFile, name] of [[dmg, names.dmg]]) {
       const file = path.join(outDir, name);
       await fs.rename(temporaryFile, file);
       artifacts.push({
@@ -364,7 +350,6 @@ export async function packageRelease(options = {}) {
       remoteRuntimes,
       signing: { identity: "ad-hoc", notarized: false, verified: true },
       validation: {
-        zipExtracted: true,
         dmgVerified: true,
         dmgMounted: true,
         codeSignatureVerified: true,
@@ -375,15 +360,7 @@ export async function packageRelease(options = {}) {
     const metadataFile = path.join(outDir, names.metadata);
     await fs.writeFile(metadataFile, JSON.stringify(metadata, null, 2) + "\n");
     const sums =
-      [
-        ...artifacts,
-        {
-          name: names.metadata,
-          sha256: sha256(await fs.readFile(metadataFile)),
-        },
-      ]
-        .map((a) => `${a.sha256}  ${a.name}`)
-        .join("\n") + "\n";
+      artifacts.map((a) => `${a.sha256}  ${a.name}`).join("\n") + "\n";
     await fs.writeFile(path.join(outDir, names.checksums), sums);
     console.log(
       JSON.stringify(
@@ -416,7 +393,6 @@ export async function packageRelease(options = {}) {
     } else {
       // Cleanup must not replace the original packaging/validation failure.
       await Promise.all([
-        fs.rm(zip, { force: true }),
         fs.rm(dmg, { force: true }),
         fs.rm(temporary, { recursive: true, force: true }),
       ]).catch((error) =>

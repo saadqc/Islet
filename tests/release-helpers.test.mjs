@@ -122,18 +122,16 @@ test("HTTP failure cannot publish an unverified cached runtime", async (t) => {
   );
   assert.deepEqual(await fs.readdir(cache), []);
 });
-test("release artifact names and options are per architecture", () => {
+test("release artifacts are Apple silicon DMG only", () => {
   assert.deepEqual(releaseNames("0.1.0", "arm64"), {
     base: "Islet_0.1.0_macos_arm64",
-    zip: "Islet_0.1.0_macos_arm64.zip",
     dmg: "Islet_0.1.0_macos_arm64.dmg",
     metadata: "Islet_0.1.0_macos_arm64.json",
-    checksums: "SHA256SUMS_macos_arm64.txt",
+    checksums: "SHA256SUMS.txt",
   });
-  assert.notEqual(
-    releaseNames("0.1.0", "arm64").checksums,
-    releaseNames("0.1.0", "x64").checksums,
-  );
+  assert.deepEqual(releaseNames("0.1.0"), releaseNames("0.1.0", "arm64"));
+  assert.throws(() => releaseNames("0.1.0", "x64"), /Apple silicon/);
+  assert.equal("zip" in releaseNames("0.1.0"), false);
   assert.throws(() => releaseNames("../0.1.0", "x64"), /semantic/);
   assert.throws(() => releaseNames("v0.1.0", "x64"), /semantic/);
   assert.deepEqual(
@@ -141,11 +139,11 @@ test("release artifact names and options are per architecture", () => {
       "--app",
       "build/Islet.app",
       "--arch",
-      "x64",
+      "arm64",
       "--out-dir",
       "release",
     ]),
-    { app: "build/Islet.app", arch: "x64", outDir: "release" },
+    { app: "build/Islet.app", arch: "arm64", outDir: "release" },
   );
   assert.throws(() => parsePackageArgs(["--arch"]), /requires a value/);
 });
@@ -160,6 +158,17 @@ test("architecture and macOS minimum validation reject wrong builds", () => {
     nodeMinimumVersion: "13.5.0",
   };
   validateReleaseIdentity(identity);
+  assert.throws(
+    () =>
+      validateReleaseIdentity({
+        ...identity,
+        requestedArch: "x64",
+        appArch: "x64",
+        nodeArch: "x64",
+        runnerArch: "x64",
+      }),
+    /Apple silicon/,
+  );
   assert.throws(
     () => validateReleaseIdentity({ ...identity, nodeArch: "x64" }),
     /Architecture mismatch/,
