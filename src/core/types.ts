@@ -29,6 +29,7 @@ export interface FileSnapshot {
   bom?: boolean;
   encoding?: string;
   readonly?: boolean;
+  image?: boolean;
   size?: number;
 }
 export interface LocationSnapshot {

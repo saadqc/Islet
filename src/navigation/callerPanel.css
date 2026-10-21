@@ -1,0 +1,58 @@
+.caller-panel {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+}
+.caller-panel header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  min-height: 32px;
+}
+.caller-target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.caller-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.caller-list {
+  max-height: 190px;
+  overflow: auto;
+  padding: 0 0 6px;
+}
+.caller-list p {
+  margin: 6px 12px;
+  color: var(--muted);
+}
+.caller-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 12px;
+  text-align: left;
+  font-size: 12px;
+}
+.caller-row:hover {
+  background: var(--selection);
+}
+.caller-name {
+  color: var(--accent);
+}
+.caller-file {
+  color: var(--muted);
+}
+.caller-limit {
+  display: block;
+  color: var(--muted);
+  margin: 3px 12px 3px 40px;
+}

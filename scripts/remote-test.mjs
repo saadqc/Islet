@@ -145,7 +145,7 @@ try {
   await fs.mkdir(project);
   await fs.writeFile(
     path.join(project, "main.py"),
-    'def greet(name: str):\n    return name\n\nresult = greet("hi")\n',
+    'def greet(name: str):\n    return name\n\nresult = greet("hi")\n\ndef parent():\n    return greet("review")\n',
   );
   const localRoot = await host.request("root.open", {
     hostId: "local",
@@ -157,6 +157,24 @@ try {
   });
   assert.notEqual(localRoot.id, remoteRoot.id);
   assert.equal(remoteRoot.hostId, config.hostId);
+  const imagePath = path.join(project, "preview.png");
+  await fs.copyFile(path.join(root, "src-tauri/icons/128x128.png"), imagePath);
+  const imageStat = await host.request("fs.stat", {
+    hostId: config.hostId,
+    path: imagePath,
+    metadataOnly: true,
+  });
+  assert.match(imageStat.revision, /^\d+:/);
+  const image = await host.request("fs.readAsset", {
+    hostId: config.hostId,
+    path: imagePath,
+  });
+  assert.equal(image.mime, "image/png");
+  assert.deepEqual(
+    Buffer.from(image.base64, "base64"),
+    await fs.readFile(imagePath),
+  );
+
   const doc = await host.request("fs.read", {
     hostId: config.hostId,
     path: path.join(project, "main.py"),
@@ -206,6 +224,36 @@ try {
     method: "initialized",
     params: {},
   });
+
+  assert.ok(initialized.capabilities.callHierarchyProvider);
+  const documentUri = "file://" + doc.path.replaceAll(" ", "%20");
+  await host.request("lsp.notify", {
+    sessionId: service.sessionId,
+    method: "textDocument/didOpen",
+    params: {
+      textDocument: {
+        uri: documentUri,
+        languageId: "python",
+        version: 1,
+        text: doc.text,
+      },
+    },
+  });
+  const prepared = await host.request("lsp.request", {
+    sessionId: service.sessionId,
+    method: "textDocument/prepareCallHierarchy",
+    params: {
+      textDocument: { uri: documentUri },
+      position: { line: 0, character: 5 },
+    },
+  });
+  assert.equal(prepared[0].name, "greet");
+  const callers = await host.request("lsp.request", {
+    sessionId: service.sessionId,
+    method: "callHierarchy/incomingCalls",
+    params: { item: prepared[0] },
+  });
+  assert.ok(callers.some((caller) => caller.from.name === "parent"));
   await host.request("remote.disconnect", { hostId: config.hostId });
   await assert.rejects(
     host.request("fs.read", { hostId: config.hostId, path: doc.path }),
@@ -271,7 +319,8 @@ try {
       "Host-separated identical canonical paths",
       "Revision-checked remote atomic save",
       "Mixed-host search and unsaved overlay",
-      "Real remote basedpyright session",
+      "Real remote basedpyright session and semantic caller hierarchy",
+      "Scoped remote image metadata and exact PNG preview bytes",
       "Disconnect retains local availability",
       "Reconnect detects changed remote revision",
       "Real SSH loss after commit reports SAVE_UNCERTAIN and reread confirms contents",

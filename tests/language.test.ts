@@ -17,3 +17,33 @@ test('Python sibling imports resolve when an enclosing multi-project folder is a
 
 test('detected project venv supplies Python-only installed modules to intelligence', {timeout:90000},async()=>{const f=await fixture({'main.py':'import islet_venv_only\nislet_venv_only.\n'});try{const venv=path.join(f.dir,'.venv');execFileSync(process.env.ISLET_PYTHON||'python3',['-m','venv','--without-pip',venv]);const python=path.join(venv,'bin/python');const site=execFileSync(python,['-c','import sysconfig; print(sysconfig.get_paths()["purelib"])'],{encoding:'utf8'}).trim();await fs.mkdir(site,{recursive:true});await fs.writeFile(path.join(site,'islet_venv_only.py'),'def venv_marker() -> str:\n    return "only in venv"\n');const doc=await f.documents.open('local',path.join(f.dir,'main.py'));const completions=await f.languages.request(doc,'textDocument/completion',doc.text.length-1);assert.ok((completions.items||completions).some((c:any)=>c.label==='venv_marker'));const session=[...f.languages.sessions.values()][0];assert.equal(await fs.realpath(session.root.interpreter!),await fs.realpath(python));}finally{await f.close();}});
 test('two editor clients isolate unsaved buffers and request IDs on the same root', {timeout:90000},async()=>{const f=await fixture({'main.py':'item = "disk"\nitem.\n'});const secondDocuments=new DocumentStore(f.engine.request.bind(f.engine) as any),secondLanguages=new LanguageManager(f.engine.request.bind(f.engine) as any);secondLanguages.roots=[f.root];secondLanguages.documents=secondDocuments;try{const a=await f.documents.open('local',path.join(f.dir,'main.py')),b=await secondDocuments.open('local',path.join(f.dir,'main.py'));f.documents.change(a.id,'item = "string"\nitem.');secondDocuments.change(b.id,'item = []\nitem.');const [first,second]=await Promise.all([f.languages.request(a,'textDocument/completion',a.text.length),secondLanguages.request(b,'textDocument/completion',b.text.length)]);assert.ok((first.items||first).some((c:any)=>c.label==='upper'));assert.equal((first.items||first).some((c:any)=>c.label==='append'),false);assert.ok((second.items||second).some((c:any)=>c.label==='append'));assert.notEqual([...f.languages.sessions.values()][0].sessionId,[...secondLanguages.sessions.values()][0].sessionId);}finally{await secondLanguages.close();await f.close();}});
+
+test('real Python caller hierarchy follows cross-file parents and stops recursive cycles', {timeout:90000}, async()=>{
+  const f=await fixture({'leaf.py':'def leaf():\n    return 1\n','parents.py':'from leaf import leaf\n\ndef parent():\n    return leaf()\n\ndef grandparent():\n    return parent()\n'});
+  try {
+    const leaf=await f.documents.open('local',path.join(f.dir,'leaf.py'));
+    await f.documents.open('local',path.join(f.dir,'parents.py'));
+    const tree=await f.languages.callers(leaf,leaf.text.indexOf('leaf'));
+    assert.equal(tree?.target.name,'leaf');
+    const parent=tree?.target.children.find(n=>n.name==='parent');
+    assert.ok(parent);
+    assert.equal(parent.location.path,await fs.realpath(path.join(f.dir,'parents.py')));
+    assert.equal(parent.location.range.start.line,2);
+    assert.ok(parent.children.some(n=>n.name==='grandparent'));
+    const body=await f.languages.callers(leaf,leaf.text.indexOf('return'));
+    assert.equal(body?.target.name,'leaf');
+  } finally {await f.close();}
+});
+test('real TypeScript caller hierarchy resolves unsaved cross-file functions', {timeout:90000}, async()=>{
+  const f=await fixture({'leaf.ts':'export function leaf(){ return 1; }\n','main.ts':'import {leaf} from "./leaf";\nfunction parent(){ return leaf(); }\nfunction grandparent(){ return parent(); }\n','tsconfig.json':'{"compilerOptions":{"module":"commonjs"},"include":["*.ts"]}'});
+  try {
+    const leaf=await f.documents.open('local',path.join(f.dir,'leaf.ts'));
+    await f.documents.open('local',path.join(f.dir,'main.ts'));
+    const tree=await f.languages.callers(leaf,leaf.text.indexOf('leaf'));
+    assert.equal(tree?.target.name,'leaf');
+    const parent=tree?.target.children.find(n=>n.name==='parent');
+    assert.ok(parent);
+    assert.equal(parent.location.range.start.line,1);
+    assert.ok(parent.children.some(n=>n.name==='grandparent'));
+  } finally {await f.close();}
+});

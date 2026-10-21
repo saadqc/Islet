@@ -7,7 +7,7 @@ import { Worker } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "0.1.2";
+export const VERSION = "0.1.3";
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 const inside = (file, root) =>
   file === root || file.startsWith(root + path.sep);
@@ -49,6 +49,8 @@ const mimeTypes = {
   ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
 };
 export const errorObject = (error) => ({
   code: error.code || "HOST_ERROR",
@@ -385,7 +387,11 @@ export class Engine {
     return {
       hostId: this.hostId,
       path: file,
-      revision: s.isFile() ? hash(await fs.readFile(file)) : null,
+      revision: s.isFile()
+        ? p.metadataOnly
+          ? `${s.size}:${s.mtimeMs}:${s.ctimeMs}`
+          : hash(await fs.readFile(file))
+        : null,
       size: s.size,
       mtimeMs: s.mtimeMs,
       isDirectory: s.isDirectory(),
@@ -496,6 +502,8 @@ export class Engine {
   }
   async asset(p) {
     const file = await this.scoped(p.path);
+    if ((await fs.stat(file)).size > 10 * 1024 * 1024)
+      fail("ASSET_TOO_LARGE", "Images are limited to 10 MB.");
     const bytes = await fs.readFile(file);
     if (bytes.length > 10 * 1024 * 1024)
       fail("ASSET_TOO_LARGE", "Images are limited to 10 MB.");

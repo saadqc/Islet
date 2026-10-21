@@ -1,3 +1,4 @@
+import { isImage } from "../media/images";
 import {minimalEdits,mapOffset,type OffsetChange} from './edits';
 import { request, type Request } from "./bridge";
 import {
@@ -21,6 +22,11 @@ export class DocumentStore {
     const id = documentId(hostId, path);
     const current = this.documents.get(id);
     if (current) return current;
+    if (isImage(path)) {
+      const stat = await this.transport<any>("fs.stat", { hostId, path, metadataOnly: true });
+      if (stat.size > 10 * 1024 * 1024) throw new Error("Images are limited to 10 MB.");
+      return this.add({ ...stat, hostId, text: "", readonly: true, image: true });
+    }
     const snapshot = await this.transport<FileSnapshot>("file.read", {
       hostId,
       path,
@@ -120,8 +126,14 @@ export class DocumentStore {
     }
   }
   async checkExternal(id: string) {
-    const doc = this.require(id),
-      fresh = await this.transport<FileSnapshot>("file.read", {
+    const doc = this.require(id);
+    if (doc.image) {
+      const stat = await this.transport<any>("fs.stat", { hostId: doc.hostId, path: doc.path, metadataOnly: true });
+      if (stat.revision === doc.revision) return false;
+      Object.assign(doc, { revision: stat.revision, diskRevision: stat.revision, size: stat.size });
+      this.emit(); return true;
+    }
+    const fresh = await this.transport<FileSnapshot>("file.read", {
         hostId: doc.hostId,
         path: doc.path,
       });

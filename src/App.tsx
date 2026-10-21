@@ -13,6 +13,7 @@ import {
   Bookmark,
   MoreHorizontal,
   Pin,
+  GitBranch,
   RefreshCw,
 } from "lucide-react";
 import { request, onHostEvent } from "./core/bridge";
@@ -39,6 +40,9 @@ import { useNativeMenu } from "./shell/NativeMenu";
 import { AddFolderDialog } from "./shell/AddFolderDialog";
 import { SearchDialog } from "./shell/SearchDialog";
 import { Preview } from "./markdown/Preview";
+import { ImagePreview } from "./media/ImagePreview";
+import { CallerPanel } from "./navigation/CallerPanel";
+import { syntaxName } from "./editor/languages";
 import {
   defaults,
   validatePreferences,
@@ -1816,6 +1820,25 @@ export default function App() {
                 <span className="breadcrumb-host">
                   {doc.hostId !== "local" ? doc.hostId : ""}
                 </span>
+                <span className="muted file-format">
+                  {doc.image ? "Image" : syntaxName(doc.path, doc.text)}
+                </span>
+                {!doc.image && (
+                  <button
+                    className="icon"
+                    title="Toggle caller panel"
+                    aria-label="Toggle caller panel"
+                    aria-pressed={settings.callerPanel}
+                    onClick={() =>
+                      setSettings({
+                        ...settings,
+                        callerPanel: !settings.callerPanel,
+                      })
+                    }
+                  >
+                    <GitBranch size={14} />
+                  </button>
+                )}
                 {doc.markdownMode && (
                   <button
                     className="mode-button"
@@ -1847,8 +1870,28 @@ export default function App() {
                   files over 5 MB.
                 </div>
               )}
+              {settings.callerPanel &&
+                !doc.image &&
+                doc.markdownMode !== "preview" && (
+                  <CallerPanel
+                    document={doc}
+                    offset={
+                      position?.documentId === doc.id
+                        ? position.head
+                        : doc.location?.head || 0
+                    }
+                    languages={languages}
+                    roots={roots}
+                    onNavigate={(location) => void navigate(location)}
+                    onClose={() =>
+                      setSettings({ ...settings, callerPanel: false })
+                    }
+                  />
+                )}
               <div className="editor-area">
-                {doc.markdownMode === "preview" ? (
+                {doc.image ? (
+                  <ImagePreview document={doc} />
+                ) : doc.markdownMode === "preview" ? (
                   <Preview
                     document={doc}
                     scroll={sourceScroll[doc.id] ?? -1}
@@ -2394,6 +2437,19 @@ export default function App() {
                 Soft wrap
               </label>
             </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={settings.callerPanel}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    callerPanel: event.target.checked,
+                  })
+                }
+              />
+              Show caller panel above the editor (up to 5 levels)
+            </label>
             <label>
               Markdown default
               <select

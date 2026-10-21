@@ -1,3 +1,4 @@
+import { loadCallerTree, type CallItem, type CallerTree } from "./callers";
 import type { DocumentStore } from "../core/documents";
 import { request, onHostEvent, type Request } from "../core/bridge";
 import {
@@ -188,38 +189,47 @@ export class LanguageManager {
     params: any,
     signal?: AbortSignal,
   ): Promise<any> {
+    if (signal?.aborted)
+      return Promise.reject(new DOMException("Canceled", "AbortError"));
     const id = ++s.nextId;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         s.pending.delete(id);
+      };
+      const cancel = () => {
         void this.send(s, {
           jsonrpc: "2.0",
           method: "$/cancelRequest",
           params: { id },
         }).catch(() => {});
+      };
+      const abort = () => {
+        cleanup();
+        cancel();
+        reject(new DOMException("Canceled", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        cancel();
         reject(new Error("Language request timed out"));
       }, 20000);
-      s.pending.set(id, { resolve, reject, timer });
-      if (signal) {
-        signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(timer);
-            s.pending.delete(id);
-            void this.send(s, {
-              jsonrpc: "2.0",
-              method: "$/cancelRequest",
-              params: { id },
-            }).catch(() => {});
-            reject(new DOMException("Canceled", "AbortError"));
-          },
-          { once: true },
-        );
-      }
-      this.send(s, { jsonrpc: "2.0", id, method, params }).catch((e) => {
-        clearTimeout(timer);
-        s.pending.delete(id);
-        reject(e);
+      s.pending.set(id, {
+        resolve: (value) => {
+          cleanup();
+          resolve(value);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+        timer,
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      this.send(s, { jsonrpc: "2.0", id, method, params }).catch((error) => {
+        cleanup();
+        reject(error);
       });
     });
   }
@@ -451,6 +461,107 @@ export class LanguageManager {
     }
     return results;
   }
+  async callers(
+    doc: DocumentModel,
+    offset: number,
+    signal?: AbortSignal,
+  ): Promise<CallerTree | undefined> {
+    const root = ownerOf(this.roots, doc.hostId, doc.path);
+    if (!root)
+      throw new Error("Add this file's folder to a workspace to find callers.");
+    const participants = [
+      ...(this.documents?.documents.values() || [doc]),
+    ].filter(
+      (item) =>
+        item.hostId === doc.hostId &&
+        languageFor(item.path) === languageFor(doc.path) &&
+        ownerOf(this.roots, item.hostId, item.path)?.id === root.id,
+    );
+    const versions = participants.map((item) => ({
+      item,
+      version: item.version,
+    }));
+    const check = () => {
+      if (signal?.aborted) throw new DOMException("Canceled", "AbortError");
+      if (versions.some(({ item, version }) => item.version !== version))
+        throw new Error(
+          "Code changed during caller analysis. Refresh callers to try again.",
+        );
+    };
+    const session = await this.ensure(root, doc);
+    check();
+    if (!session?.capabilities.callHierarchyProvider)
+      throw new Error("This language server does not provide caller analysis.");
+    for (const item of participants) {
+      check();
+      await this.ensure(root, item);
+    }
+    const prepare = async (position: Position) => {
+      check();
+      return this.rpc(
+        session,
+        "textDocument/prepareCallHierarchy",
+        { textDocument: { uri: fileUri(doc.path) }, position },
+        signal,
+      ) as Promise<CallItem[] | null>;
+    };
+    const position = positionAt(doc.text, offset);
+    let items = await prepare(position);
+    if (!items?.length) {
+      const symbols = await this.request(
+        doc,
+        "textDocument/documentSymbol",
+        undefined,
+        {},
+        signal,
+      );
+      let nearest: any;
+      const contains = (range: Range) =>
+        range &&
+        (position.line > range.start.line ||
+          (position.line === range.start.line &&
+            position.character >= range.start.character)) &&
+        (position.line < range.end.line ||
+          (position.line === range.end.line &&
+            position.character <= range.end.character));
+      const visit = (values: any[]) => {
+        for (const value of values || []) {
+          if (contains(value.range || value.location?.range)) {
+            if ([6, 9, 12].includes(value.kind)) nearest = value;
+            visit(value.children);
+          }
+        }
+      };
+      visit(symbols);
+      if (nearest)
+        items = await prepare(
+          (nearest.selectionRange || nearest.range || nearest.location.range)
+            .start,
+        );
+    }
+    check();
+    const target =
+      items?.find((item) => [6, 9, 12].includes(item.kind)) || items?.[0];
+    if (!target) return;
+    const result = await loadCallerTree(
+      target,
+      doc.hostId,
+      async (item) => {
+        check();
+        const calls = await this.rpc(
+          session,
+          "callHierarchy/incomingCalls",
+          { item },
+          signal,
+        );
+        check();
+        return calls || [];
+      },
+      signal,
+    );
+    check();
+    return result;
+  }
   references(doc: DocumentModel, offset: number) {
     return this.locations(doc, "textDocument/references", offset);
   }
@@ -637,6 +748,7 @@ function initializeParams(root: Root) {
           },
         },
         definition: { linkSupport: true },
+        callHierarchy: { dynamicRegistration: false },
         references: {},
         documentSymbol: { hierarchicalDocumentSymbolSupport: true },
         rename: { prepareSupport: true },

@@ -25,7 +25,14 @@ await fs.mkdir(path.join(fixture, "folder with spaces"), { recursive: true });
 await fs.rm(path.join(root, "design/validation/package-test-report.json"), {
   force: true,
 });
-const env = { ...process.env, ISLET_DATA_DIR: data };
+const preferences = path.join(root, ".tools/package-test-preferences");
+await fs.rm(preferences, { recursive: true, force: true });
+await fs.mkdir(preferences, { recursive: true });
+const env = {
+  ...process.env,
+  ISLET_DATA_DIR: data,
+  CFFIXED_USER_HOME: preferences,
+};
 delete env.ISLET_NATIVE_TEST_SCRIPT;
 delete env.ISLET_DEV_TOKEN;
 env.PATH = "/usr/bin:/bin:/usr/sbin:/sbin";

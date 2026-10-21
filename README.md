@@ -2,6 +2,8 @@
 
 Islet is a macOS desktop code editor with Islands Dark and Islands Light themes. It combines CodeMirror editing, Python and JavaScript/TypeScript language services, local and SSH folders, semantic navigation and rename, bookmarks, Markdown reading, and workspace Find/Replace.
 
+The editor also highlights JSON, YAML, TOML, shell/Bash, XML, SQL, INI, Dockerfiles and requirements files. Common raster images open in read-only preview tabs with fit/zoom controls. Enable **Show caller panel above the editor** in Settings, or use the branch button beside the format label, to follow up to five levels of Python/JavaScript/TypeScript callers. Each entry links to its function definition and shows its file and line. Caller analysis follows code references; it is not a runtime debugger stack.
+
 This is a functional preview implementation. The [validation record](docs/VALIDATION.md) distinguishes automated checks from the remaining platform and physical-input checks. The approved [plan](docs/PLAN.md), [interaction specification](docs/REVIEW_WORKSPACES.md), and [visual reference](docs/REFERENCE.md) remain the product specification.
 
 ## Run

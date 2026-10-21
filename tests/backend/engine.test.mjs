@@ -1031,3 +1031,35 @@ test("file rename migrates its active watch to the new path", async (t) => {
   assert.equal(engine.watchers.has(oldPath), false);
   assert.equal(engine.documents.has(newPath), true);
 });
+
+test("image preview metadata avoids text reads and enforces scope, MIME and size", async (t) => {
+  const { dir, engine } = await fixture(t);
+  const file = path.join(dir, "preview.png");
+  const bytes = await fs.readFile(
+    new URL("../../src-tauri/icons/128x128.png", import.meta.url),
+  );
+  await fs.writeFile(file, bytes);
+  const metadata = await engine.request("fs.stat", {
+    path: file,
+    metadataOnly: true,
+  });
+  assert.equal(metadata.size, bytes.length);
+  assert.match(metadata.revision, /^\d+:/);
+  const asset = await engine.request("fs.readAsset", { path: file });
+  assert.equal(asset.mime, "image/png");
+  assert.deepEqual(Buffer.from(asset.base64, "base64"), bytes);
+  const svg = path.join(dir, "active.svg");
+  await fs.writeFile(
+    svg,
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>throw 1</script></svg>',
+  );
+  await assert.rejects(engine.request("fs.readAsset", { path: svg }), {
+    code: "UNSUPPORTED_ASSET",
+  });
+  const large = path.join(dir, "large.png");
+  await fs.writeFile(large, "");
+  await fs.truncate(large, 10 * 1024 * 1024 + 1);
+  await assert.rejects(engine.request("fs.readAsset", { path: large }), {
+    code: "ASSET_TOO_LARGE",
+  });
+});

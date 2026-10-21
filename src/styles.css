@@ -367,7 +367,7 @@ select:focus {
 }
 .cm-content {
   padding-top: 8px !important;
-  padding-bottom: 120px !important;
+  padding-bottom: 8px;
 }
 .cm-gutters {
   border: 0 !important;

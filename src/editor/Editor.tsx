@@ -22,6 +22,7 @@ import {
   highlightActiveLine,
   highlightActiveLineGutter,
   drawSelection,
+  scrollPastEnd,
   dropCursor,
   rectangularSelection,
   crosshairCursor,
@@ -67,9 +68,7 @@ import {
   openSearchPanel,
 } from "@codemirror/search";
 import { setDiagnostics, lintGutter } from "@codemirror/lint";
-import { python } from "@codemirror/lang-python";
-import { javascript } from "@codemirror/lang-javascript";
-import { markdown } from "@codemirror/lang-markdown";
+import { language } from "./languages";
 import { tags } from "@lezer/highlight";
 import {
   offsetAt,
@@ -153,23 +152,20 @@ const modifierField = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
+const modifierPointers = new WeakMap<EditorView, { x: number; y: number }>();
 function modifierHover(view: EditorView, event: MouseEvent | KeyboardEvent) {
-  const active = event.metaKey || event.ctrlKey;
+  if ("clientX" in event)
+    modifierPointers.set(view, { x: event.clientX, y: event.clientY });
+  const point = modifierPointers.get(view);
+  const offset = point ? view.posAtCoords(point) : null;
+  const word = offset == null ? null : view.state.wordAt(offset);
+  const active = (event.metaKey || event.ctrlKey) && !!word;
   view.dom.classList.toggle("islet-modifier", active);
-  if (!active) {
-    if (view.state.field(modifierField).size)
-      view.dispatch({ effects: modifierEffect.of(null) });
-    return;
-  }
-  if (!("clientX" in event)) return;
-  const offset = view.posAtCoords({ x: event.clientX, y: event.clientY });
-  if (offset == null) return;
-  const word = view.state.wordAt(offset);
-  if (word)
-    view.dispatch({
-      effects: modifierEffect.of({ from: word.from, to: word.to }),
-    });
-  else view.dispatch({ effects: modifierEffect.of(null) });
+  view.dispatch({
+    effects: modifierEffect.of(
+      active && word ? { from: word.from, to: word.to } : null,
+    ),
+  });
 }
 const bookmarkEffect = StateEffect.define<RangeSet<GutterMarker>>();
 const bookmarkField = StateField.define<RangeSet<GutterMarker>>({
@@ -198,7 +194,10 @@ function syntax(dark: boolean) {
         tag: [tags.string, tags.special(tags.string)],
         color: dark ? "#6AAB73" : "#067D17",
       },
-      { tag: [tags.number, tags.bool], color: dark ? "#2AACB8" : "#1750EB" },
+      {
+        tag: [tags.number, tags.bool, tags.null],
+        color: dark ? "#2AACB8" : "#1750EB",
+      },
       {
         tag: tags.comment,
         color: dark ? "#7A7E85" : "#8C8C8C",
@@ -221,6 +220,16 @@ function syntax(dark: boolean) {
         color: dark ? "#BCBEC4" : "#080808",
       },
       { tag: tags.regexp, color: dark ? "#6AAB73" : "#067D17" },
+      {
+        tag: [tags.tagName, tags.labelName],
+        color: dark ? "#E8BF6A" : "#0033B3",
+      },
+      { tag: tags.operator, color: dark ? "#BCBEC4" : "#080808" },
+      {
+        tag: tags.link,
+        color: dark ? "#56A8F5" : "#1750EB",
+        textDecoration: "underline",
+      },
     ]),
   );
 }
@@ -256,10 +265,11 @@ function theme(settings: EditorSettings = {}) {
           minWidth: "34px",
           padding: "0 7px",
         },
-        ".cm-activeLine,.cm-activeLineGutter": {
+        ".cm-activeLine": { backgroundColor: dark ? "#FFFFFF08" : "#547AFF0A" },
+        ".cm-activeLineGutter": {
           backgroundColor: dark ? "#1F2024" : "#F5F8FE",
         },
-        "&.cm-focused .cm-selectionBackground,.cm-selectionBackground,::selection":
+        "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground":
           { backgroundColor: dark ? "#214283" : "#A6D2FF" },
         ".cm-cursor": { borderLeftColor: dark ? "#BCBEC4" : "#080808" },
         ".cm-tooltip": {
@@ -314,7 +324,13 @@ function theme(settings: EditorSettings = {}) {
           maxWidth: "600px",
           whiteSpace: "pre-wrap",
         },
-        ".islet-modifier .cm-content": { cursor: "pointer" },
+        "&.islet-modifier .cm-content, &.islet-modifier .cm-content *": {
+          cursor: "pointer",
+        },
+        ".cm-selectionMatch": {
+          backgroundColor: dark ? "#6B836136" : "#B6D6AA66",
+          outline: "1px solid " + (dark ? "#73876A" : "#8AA67C"),
+        },
         ".cm-modifier-symbol": {
           textDecoration: "underline",
           textUnderlineOffset: "2px",
@@ -324,18 +340,6 @@ function theme(settings: EditorSettings = {}) {
     ),
     settings.wrap ? EditorView.lineWrapping : [],
   ];
-}
-function language(path: string) {
-  return /\.pyi?$/.test(path)
-    ? python()
-    : /\.[cm]?[jt]sx?$/.test(path)
-      ? javascript({
-          typescript: /\.[cm]?tsx?$/.test(path),
-          jsx: /\.[jt]sx$/.test(path),
-        })
-      : /\.(?:md|markdown)$/.test(path)
-        ? markdown()
-        : [];
 }
 function plain(contents: any): string {
   if (Array.isArray(contents)) return contents.map(plain).join("\n\n");
@@ -396,7 +400,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
       requestAnimationFrame(() => {
         if (viewRef.current !== v) return;
         v.dispatch({
-          effects: EditorView.scrollIntoView(head, { y: "center" }),
+          effects: EditorView.scrollIntoView(head, {
+            y: "start",
+            yMargin: v.defaultLineHeight * 5,
+          }),
         });
       });
     };
@@ -697,6 +704,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         extensions: [
           history(),
           drawSelection(),
+          scrollPastEnd(),
           dropCursor(),
           rectangularSelection(),
           crosshairCursor(),
@@ -726,7 +734,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
               },
             },
           }),
-          language(props.document.path),
+          language(props.document.path, props.document.text),
           themeComp.current.of(theme(props.settings)),
           EditorState.tabSize.of(props.settings?.tabSize || 4),
           EditorState.readOnly.of(!!props.document.readonly),
@@ -1040,6 +1048,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         parent: container.current,
       });
       viewRef.current = view;
+      const modifierKey = (event: KeyboardEvent) => modifierHover(view, event);
+      const clearModifier = () => {
+        modifierPointers.delete(view);
+        view.dom.classList.remove("islet-modifier");
+        view.dispatch({ effects: modifierEffect.of(null) });
+      };
+      window.addEventListener("keydown", modifierKey);
+      window.addEventListener("keyup", modifierKey);
+      window.addEventListener("blur", clearModifier);
+      view.contentDOM.addEventListener("mouseleave", clearModifier);
       docRef.current = props.document;
       bookmarks();
       if (props.document.location) restore(props.document.location);
@@ -1070,6 +1088,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         states.set(docRef.current.id, view.state);
         propsRef.current.document.location = snapshot();
         unsubscribe?.();
+        window.removeEventListener("keydown", modifierKey);
+        window.removeEventListener("keyup", modifierKey);
+        window.removeEventListener("blur", clearModifier);
+        view.contentDOM.removeEventListener("mouseleave", clearModifier);
         clearTimeout(timer.current);
         view.destroy();
         viewRef.current = null;
