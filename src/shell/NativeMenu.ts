@@ -38,6 +38,7 @@ export function useNativeMenu(
             text: "Islet",
             items: [
               item("settings", "Settings…", "CmdOrCtrl+Comma"),
+              item("checkUpdates", "Check for Updates…"),
               { item: "Separator" },
               item("closeWindow", "Close Workspace", "CmdOrCtrl+Shift+W"),
             ],

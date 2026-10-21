@@ -1,0 +1,35 @@
+.update-settings {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.update-settings h3 {
+  margin: 0 0 8px;
+}
+.update-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.update-dialog progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.update-dialog pre {
+  white-space: pre-wrap;
+  font: inherit;
+  max-height: 250px;
+  overflow: auto;
+}
+.update-banner {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.update-freeze {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: #17191bcf;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}

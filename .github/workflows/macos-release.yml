@@ -34,7 +34,7 @@ jobs:
       - run: npm ci
       - run: mkdir -p design/validation
       - run: npm test
-      - run: node --test tests/release-helpers.test.mjs
+      - run: node --test tests/release-helpers.test.mjs tests/updater-release.test.mjs
       - run: npm run test:backend
       - run: npm run build
       - run: npx playwright install chromium
@@ -82,7 +82,7 @@ jobs:
       - run: mkdir -p design/validation
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - run: npm test
-      - run: node --test tests/release-helpers.test.mjs
+      - run: node --test tests/release-helpers.test.mjs tests/updater-release.test.mjs
       - run: npm run test:backend
       - name: Assemble verified bundled runtimes
         run: |
@@ -105,6 +105,20 @@ jobs:
         env:
           EXPECTED_ARCH: arm64
         run: node scripts/package-release.mjs --out-dir release-artifacts
+      - name: Create and verify signed automatic update archive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/package-updater.mjs
+      - name: Rehearse verified update installation and relaunch in an isolated app
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./package.json").version')
+          export ISLET_UPDATE_TEST_ARCHIVE="$PWD/release-artifacts/Islet_${version}_macos_arm64.app.tar.gz"
+          export ISLET_UPDATE_TEST_SIGNATURE="$ISLET_UPDATE_TEST_ARCHIVE.sig"
+          export ISLET_UPDATE_TEST_APP="$PWD/src-tauri/target/release/bundle/macos/Islet.app"
+          cargo test --manifest-path src-tauri/Cargo.toml --locked actual_signed_archive_download_install_and_relaunch -- --ignored --nocapture
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: islet-macos-arm64
@@ -118,6 +132,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-15
     timeout-minutes: 15
+    concurrency:
+      group: islet-updater-publication
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:

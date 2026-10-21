@@ -54,6 +54,8 @@ import { ProjectSidebar } from "./shell/ProjectSidebar";
 import { desktopActions } from "./shell/desktopActions";
 import { openDroppedPaths } from "./shell/fileDrops";
 import { attachWorkspaceRoot, mergeManifestRoots } from "./workspaces/roots";
+import { UpdateDialog, UpdateSettings, useUpdates } from "./updates/Updates";
+import { restartBlocked, updateLabel } from "./updates/client";
 const documents = new DocumentStore(),
   transactions = new TransactionService(documents),
   languages = new LanguageManager(),
@@ -168,6 +170,26 @@ export default function App() {
     persistenceQueue.current = pending;
     return pending;
   };
+  const updates = useUpdates({
+    ready,
+    persist: () => persistRef.current(),
+    unsafe: () =>
+      restartBlocked(
+        documents.documents.values(),
+        transactions.transactions.some(
+          (transaction) =>
+            transaction.journal?.some((entry) =>
+              ["pending", "uncertain"].includes(entry.state),
+            ) || false,
+        ),
+      ),
+  });
+  useEffect(() => {
+    if (updates.open) {
+      setModal(null);
+      setMenu(null);
+    }
+  }, [updates.open]);
   const doc = documents.documents.get(active),
     currentRoot = doc ? ownerOf(roots, doc.hostId, doc.path) : undefined,
     dark =
@@ -311,6 +333,10 @@ export default function App() {
     void import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
       const native = getCurrentWindow();
       const cleanup = await native.onCloseRequested(async (event) => {
+        if (updates.frozenRef.current) {
+          event.preventDefault();
+          return;
+        }
         if (allowClose.current) return;
         event.preventDefault();
         if ([...documents.documents.values()].some((d) => d.dirty)) {
@@ -1065,6 +1091,7 @@ export default function App() {
       await open(doc.hostId, doc.path, false, offset, true);
   }
   function command(id: string) {
+    if (updates.frozenRef.current) return;
     id =
       (
         {
@@ -1332,6 +1359,11 @@ export default function App() {
   }, [menu]);
   useNativeMenu(
     (id) => {
+      if (updates.frozenRef.current) return;
+      if (id === "checkUpdates") {
+        updates.check();
+        return;
+      }
       if (id === "settings") {
         setModal("settings");
         return;
@@ -1458,6 +1490,19 @@ export default function App() {
           <ChevronDown size={13} />
         </button>
         <div className="titlebar-spacer" data-tauri-drag-region />
+        {updates.state.version && (
+          <button
+            className="update-banner"
+            title={updateLabel(updates.state)}
+            onClick={() => updates.setOpen(true)}
+          >
+            {["downloading", "verifying"].includes(updates.state.phase)
+              ? "Downloading update…"
+              : updates.state.phase === "ready"
+                ? "Restart to Update…"
+                : "Update…"}
+          </button>
+        )}
         <button
           className="icon"
           title="Find in Files (⇧⌘F)"
@@ -2395,6 +2440,11 @@ export default function App() {
               onChange={(terminal) => setSettings({ ...settings, terminal })}
               onError={fail}
             />
+            <UpdateSettings
+              client={updates.client}
+              state={updates.state}
+              show={() => updates.setOpen(true)}
+            />
             <CodespacesPluginSettings
               client={codespaces}
               onError={fail}
@@ -2709,6 +2759,18 @@ export default function App() {
             </footer>
           </div>
         </Modal>
+      )}
+      {updates.open && (
+        <UpdateDialog
+          client={updates.client}
+          state={updates.state}
+          onClose={() => updates.setOpen(false)}
+        />
+      )}
+      {updates.frozen && (
+        <div className="update-freeze" role="alert">
+          {updateLabel(updates.state)}
+        </div>
       )}
     </div>
   );

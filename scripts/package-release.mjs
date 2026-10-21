@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { signPreview } from "./sign-preview.mjs";
 import { verifyBundleIcon } from "./app-icon.mjs";
+import { bundleManifest, digest } from "./package-updater.mjs";
 import {
   archiveFor,
   inspectBinary,
@@ -323,6 +324,11 @@ export async function packageRelease(options = {}) {
     );
     mounted = true;
     await verifyExtracted(path.join(mount, "Islet.app"), { arch, version });
+    const bundleSha256 = digest(
+      Buffer.from(
+        JSON.stringify(await bundleManifest(path.join(mount, "Islet.app"))),
+      ),
+    );
     if (
       (await fs.readlink(path.join(mount, "Applications"))) !== "/Applications"
     )
@@ -347,6 +353,7 @@ export async function packageRelease(options = {}) {
       arch,
       createdAt: new Date().toISOString(),
       commit: process.env.GITHUB_SHA || null,
+      bundleSha256,
       minimumSystemVersion: identity.minimumSystemVersion,
       node: identity.runtime,
       remoteRuntimes,

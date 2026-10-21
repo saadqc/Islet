@@ -1,6 +1,6 @@
 [package]
 name = "islet"
-version = "0.1.1"
+version = "0.1.2"
 description = "A focused desktop code editor"
 authors = ["Islet contributors"]
 edition = "2021"
@@ -16,5 +16,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
 rfd = "0.15"
+tauri-plugin-updater = "2"
+reqwest = { version = "0.13", default-features = false }
+tempfile = "3"
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+base64 = "0.22"

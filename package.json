@@ -1,6 +1,6 @@
 {
   "name": "islet",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "desktop": "tauri dev",
     "desktop:build": "node scripts/setup-runtime.mjs && tauri build && node scripts/sign-preview.mjs",
     "test:backend": "node --test tests/backend/engine.test.mjs tests/backend/codespaces.test.mjs",
-    "test:ui": "node tests/ui-regression.mjs && node tests/interpreter-ui.mjs && node tests/codespaces-ui.mjs && node tests/sidebar-terminal-ui.mjs && node tests/tabs-navigation-ui.mjs",
+    "test:ui": "node tests/ui-regression.mjs && node tests/interpreter-ui.mjs && node tests/codespaces-ui.mjs && node tests/sidebar-terminal-ui.mjs && node tests/tabs-navigation-ui.mjs && node tests/updates-ui.mjs",
     "dev:app": "node scripts/dev.mjs",
     "runtime:setup": "node scripts/setup-runtime.mjs",
     "runtime:remote": "node scripts/setup-runtime.mjs --remote",

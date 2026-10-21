@@ -13,6 +13,7 @@ use std::{
 use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 mod desktop;
+mod updater;
 
 type Reply = Result<Value, String>;
 struct HostState {
@@ -149,6 +150,14 @@ async fn host_request(
     payload: Option<Value>,
 ) -> Reply {
     let mut p = payload.unwrap_or_else(|| json!({}));
+    if operation.starts_with("updater.") {
+        return updater::handle(&app, window.label(), &operation, p).await;
+    }
+    if app.state::<Arc<updater::Service>>().preparing()
+        && !matches!(operation.as_str(), "session.save" | "session.register")
+    {
+        return Err("Islet is preparing to restart. Try again after the update.".into());
+    }
     if let Some(object) = p.as_object_mut() {
         object
             .entry("clientId")
@@ -261,6 +270,7 @@ async fn host_request(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             let operation = match event {
                 tauri::WindowEvent::Destroyed => {
@@ -294,6 +304,7 @@ pub fn run() {
         .setup(|app| {
             let state = HostState::start(app.handle().clone()).map_err(std::io::Error::other)?;
             app.manage(state);
+            updater::start(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
