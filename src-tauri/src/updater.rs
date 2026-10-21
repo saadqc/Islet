@@ -486,7 +486,10 @@ mod tests {
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let version = config["version"].as_str().unwrap().to_string();
         let directory = tempfile::tempdir().unwrap();
-        let installed = directory.path().join("Islet.app");
+        // Tauri deliberately rejects macOS executables reached through symlinks
+        // (the default temporary directory commonly starts with /var).
+        let directory_path = directory.path().canonicalize().unwrap();
+        let installed = directory_path.join("Islet.app");
         assert!(Command::new("/bin/cp")
             .args(["-R"])
             .arg(&source)
@@ -509,6 +512,9 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 };
+                // Accepted sockets inherit nonblocking mode on macOS. The bounded
+                // blocking writer must finish the archive before closing the response.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -593,23 +599,31 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        let data = directory.path().join("data");
+        let data = directory_path.join("data");
+        let preferences = directory_path.join("preferences");
         std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&preferences).unwrap();
+        let log_path = directory.path().join("relaunch.log");
+        let log = std::fs::File::create(&log_path).unwrap();
         let mut child = ChildGuard(
             Command::new(installed.join("Contents/MacOS/islet"))
                 .env("ISLET_DATA_DIR", &data)
+                // Isolate macOS saved-window and crash-restoration preferences.
+                .env("CFFIXED_USER_HOME", &preferences)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
                 .spawn()
                 .unwrap(),
         );
         let resources = installed.join("Contents/Resources");
         let mut ready = false;
+        let mut last_cli = String::new();
         for _ in 0..100 {
             assert!(
                 child.0.try_wait().unwrap().is_none(),
-                "Updated app exited before handshake"
+                "Updated app exited before handshake. App log: {}",
+                std::fs::read_to_string(&log_path).unwrap_or_default()
             );
             let output = Command::new(resources.join("resources/runtime/node"))
                 .arg(resources.join("_up_/scripts/islet.mjs"))
@@ -617,6 +631,11 @@ mod tests {
                 .env("ISLET_DATA_DIR", &data)
                 .output()
                 .unwrap();
+            last_cli = format!(
+                "stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             if output.status.success()
                 && serde_json::from_slice::<Value>(&output.stdout)
                     .ok()
@@ -631,7 +650,9 @@ mod tests {
         }
         assert!(
             ready,
-            "Updated app must relaunch and register its native window"
+            "Updated app must relaunch and register its native window. CLI: {}; App log: {}",
+            last_cli,
+            std::fs::read_to_string(&log_path).unwrap_or_default()
         );
         drop(child);
     }
