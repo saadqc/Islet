@@ -8,7 +8,6 @@ import {
   ArrowRight,
   Plus,
   X,
-  FileCode,
   PanelLeft,
   Save,
   Bookmark,
@@ -17,6 +16,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { request, onHostEvent } from "./core/bridge";
+import { FileIcon } from "./icons/FileIcon";
 import { DocumentStore } from "./core/documents";
 import {
   documentId,
@@ -46,11 +46,20 @@ import {
 } from "./settings/preferences";
 import { shortcuts, matchesBinding } from "./settings/shortcuts";
 import { base, type Root, parseLocation } from "./workspaces/model";
+import { CodespacesClient } from "./plugins/codespaces/client";
+import { CodespacesPanel } from "./plugins/codespaces/CodespacesPanel";
+import { CodespacesPluginSettings } from "./plugins/codespaces/PluginSettings";
+import { TerminalSettings } from "./settings/TerminalSettings";
+import { ProjectSidebar } from "./shell/ProjectSidebar";
+import { desktopActions } from "./shell/desktopActions";
+import { openDroppedPaths } from "./shell/fileDrops";
+import { attachWorkspaceRoot, mergeManifestRoots } from "./workspaces/roots";
 const documents = new DocumentStore(),
   transactions = new TransactionService(documents),
   languages = new LanguageManager(),
   history = new NavigationHistory(),
-  bookmarks = new BookmarkStore();
+  bookmarks = new BookmarkStore(),
+  codespaces = new CodespacesClient();
 languages.documents = documents;
 type MenuItem = {
   label: string;
@@ -61,11 +70,13 @@ type MenuItem = {
 };
 export default function App() {
   const [tick, setTick] = useState(0),
-    [roots, setRoots] = useState<Root[]>([]),
+    [roots, setRootState] = useState<Root[]>([]),
     [tabs, setTabs] = useState<string[]>([]),
     [active, setActive] = useState(""),
     [settings, setSettings] = useState<Preferences>(defaults),
-    [treeVisible, setTreeVisible] = useState(true),
+    [treeVisible, setTreeVisible] = useState(
+      () => localStorage.getItem("islet.projectSidebar.visible") !== "false",
+    ),
     [modal, setModal] = useState<string | null>(null),
     [error, setError] = useState(""),
     [searchScope, setSearchScope] = useState<
@@ -92,8 +103,16 @@ export default function App() {
     [position, setPosition] = useState<LocationSnapshot>(),
     [auth, setAuth] = useState<any>(null),
     [authResponse, setAuthResponse] = useState(""),
-    [sourceScroll, setSourceScroll] = useState<Record<string, number>>({});
+    [sourceScroll, setSourceScroll] = useState<Record<string, number>>({}),
+    [interpreterDraft, setInterpreterDraft] = useState(""),
+    [codespacesSettings, setCodespacesSettings] = useState(codespaces.settings);
+  const setRoots = (value: Root[] | ((previous: Root[]) => Root[])) => {
+    const next = typeof value === "function" ? value(languages.roots) : value;
+    languages.roots = next;
+    setRootState(next);
+  };
   const persistenceQueue = useRef<Promise<void>>(Promise.resolve());
+  const dropFiles = useRef<(paths: string[]) => Promise<void>>(async () => {});
   const recoveryKey = useRef("recovery:" + crypto.randomUUID());
   const handledRequests = useRef(new Set<string>());
   const [referenceIndex, setReferenceIndex] = useState(-1);
@@ -150,18 +169,48 @@ export default function App() {
     return pending;
   };
   const doc = documents.documents.get(active),
+    currentRoot = doc ? ownerOf(roots, doc.hostId, doc.path) : undefined,
     dark =
       settings.theme === "dark" ||
       (settings.theme === "system" &&
         window.matchMedia("(prefers-color-scheme: dark)").matches);
-  languages.roots = roots;
+  useEffect(() => {
+    if (modal === "settings")
+      setInterpreterDraft(currentRoot?.interpreter || "");
+  }, [modal, currentRoot?.hostId, currentRoot?.id, currentRoot?.interpreter]);
   const refresh = () => setTick((t) => t + 1);
   const fail = (e: unknown) => setError(String(e).replace(/^Error: /, ""));
   useEffect(() => documents.subscribe(refresh), []);
+  useEffect(() => {
+    localStorage.setItem("islet.projectSidebar.visible", String(treeVisible));
+  }, [treeVisible]);
   useEffect(() => languages.subscribe(refresh), []);
   useEffect(() => {
-    languages.roots = roots;
-  }, [roots]);
+    if (!(window as any).__TAURI_INTERNALS__) return;
+    let disposed = false,
+      off: (() => void) | undefined;
+    void import("@tauri-apps/api/webview")
+      .then(async ({ getCurrentWebview }) => {
+        const unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "drop")
+            void dropFiles.current(event.payload.paths).catch(fail);
+        });
+        if (disposed) unlisten();
+        else off = unlisten;
+      })
+      .catch(fail);
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
+  useEffect(() => {
+    const off = codespaces.subscribe(() =>
+      setCodespacesSettings(codespaces.settings),
+    );
+    void codespaces.load().catch(fail);
+    return off;
+  }, []);
   useEffect(() => {
     if (loaded.current) return;
     loaded.current = true;
@@ -313,6 +362,33 @@ export default function App() {
         if (documents.documents.has(id))
           void documents.checkExternal(id).catch(fail);
       }
+      if (event.type === "codespaces-settings") {
+        codespaces.accept(event.settings);
+        if (!event.settings.enabled)
+          setModal((current) => (current === "codespaces" ? null : current));
+      }
+      if (event.type === "codespaces-buffer-check") {
+        const affected = [...documents.documents.values()].filter(
+          (document) => document.hostId === event.hostId,
+        );
+        void request("codespaces.buffers", {
+          requestId: event.requestId,
+          windowId: windowId.current,
+          dirtyCount: affected.filter(
+            (document) =>
+              document.dirty ||
+              document.saveState === "pending" ||
+              document.saveState === "uncertain",
+          ).length,
+          pendingTransactions: transactions.transactions.filter(
+            (transaction) =>
+              transaction.files.some((file) => file.hostId === event.hostId) &&
+              transaction.journal?.some((entry) =>
+                ["pending", "uncertain"].includes(entry.state),
+              ),
+          ).length,
+        }).catch(fail);
+      }
       if (event.type === "authentication") {
         setAuth(event);
         setAuthResponse("");
@@ -340,6 +416,27 @@ export default function App() {
         workspaceIdentity,
       }).catch(fail);
   }, [ready, workspaceName, workspaceId, workspaceIdentity]);
+  async function openRestoredRoot(root: Root): Promise<Root> {
+    try {
+      return await request<Root>("root.open", {
+        ...root,
+        clientId: languages.clientId,
+      });
+    } catch (error) {
+      if ((error as any)?.code !== "INVALID_INTERPRETER") throw error;
+      fail(
+        new Error(
+          `${root.label}: the configured Python interpreter is unavailable. Choose an executable on ${root.hostId} in Language settings. Folder browsing remains available.`,
+        ),
+      );
+      const opened = await request<Root>("root.open", {
+        ...root,
+        interpreter: "",
+        clientId: languages.clientId,
+      });
+      return { ...opened, interpreter: root.interpreter };
+    }
+  }
   async function restoreSession(session: any) {
     documents.documents.clear();
     transactions.transactions = [];
@@ -359,7 +456,7 @@ export default function App() {
     await Promise.all(
       localRoots.map(async (root) => {
         try {
-          const checked = await request<Root>("root.open", root);
+          const checked = await openRestoredRoot(root);
           setRoots((rs) => rs.map((r) => (r.id === root.id ? checked : r)));
         } catch {
           setRoots((rs) =>
@@ -371,7 +468,7 @@ export default function App() {
       }),
     );
     for (const root of restored.filter((root) => root.hostId !== "local"))
-      void request<Root>("root.open", root)
+      void openRestoredRoot(root)
         .then((checked) => {
           setRoots((rs) => rs.map((r) => (r.id === root.id ? checked : r)));
           for (const d of documents.documents.values())
@@ -398,8 +495,32 @@ export default function App() {
       if (restoredDoc.hostId === "local") void validateRestored(restoredDoc);
     documents.emit();
   }
-  async function openManifest(path: string, preferNewWindow = true) {
-    const manifest: any = await request("workspace.load", { path });
+  async function reattachProviderRoots(hostId: string) {
+    const attached = languages.roots.filter((root) => root.hostId === hostId);
+    for (const root of attached) {
+      const checked = await openRestoredRoot(root);
+      setRoots((current) =>
+        current.map((item) =>
+          item.hostId === hostId && item.id === root.id ? checked : item,
+        ),
+      );
+    }
+    for (const document of documents.documents.values()) {
+      if (document.hostId !== hostId) continue;
+      await validateRestored(document);
+      const owner = ownerOf(languages.roots, hostId, document.path);
+      if (owner) void languages.ensure(owner, document).catch(fail);
+    }
+  }
+  async function openManifest(
+    path: string,
+    preferNewWindow = true,
+    interpreterOverrides: any[] = [],
+  ) {
+    const manifest: any = await request("workspace.load", {
+      path,
+      interpreterOverrides,
+    });
     if (roots.length || documents.documents.size) {
       if (!preferNewWindow)
         throw Error(
@@ -409,6 +530,7 @@ export default function App() {
       await request("cli.deliver", {
         operation: "open",
         workspace: manifest.manifestPath || path,
+        interpreterOverrides,
         newWindow: false,
         windowId: created.windowId,
         requestId: crypto.randomUUID(),
@@ -437,7 +559,7 @@ export default function App() {
       id: manifest.id || crypto.randomUUID(),
       name: manifest.name || base(path),
       workspaceIdentity: manifest.manifestPath || path,
-      roots: manifest.roots,
+      roots: mergeManifestRoots(prior?.roots || [], manifest.roots),
       documents: included,
       tabs: (prior?.tabs || []).filter((id: string) => ids.has(id)),
       active: ids.has(prior?.active) ? prior.active : "",
@@ -499,55 +621,77 @@ export default function App() {
       return;
     }
     if (req.workspace) {
-      await openManifest(req.workspace, false);
+      await openManifest(req.workspace, false, req.interpreterOverrides || []);
       return;
     }
     for (const item of req.roots || [])
       await addRoot(
         typeof item === "string" ? item : item.uri || item.path,
         item.hostId,
+        typeof item === "string" ? {} : item,
       );
   }
-  async function addRoot(value: string, hostOverride?: string) {
+  async function addRoot(
+    value: string,
+    hostOverride?: string,
+    configuration: Partial<Root> = {},
+  ) {
     let parsed: { hostId: string; path: string } | undefined;
     try {
       parsed =
         hostOverride && hostOverride !== "local"
           ? { hostId: hostOverride, path: value }
           : parseLocation(value);
-      const root = await request<Root>("root.open", { ...parsed });
-      setRoots((rs) =>
-        rs.some((r) => r.hostId === root.hostId && r.path === root.path)
-          ? rs
-          : [...rs, root],
+      return await attachWorkspaceRoot(
+        { ...configuration, ...parsed },
+        languages,
+        request,
       );
-      return root;
     } catch (e) {
-      if (parsed && parsed.hostId !== "local") {
-        const root = {
+      if (
+        parsed &&
+        parsed.hostId !== "local" &&
+        !(e as any)?.code?.includes("INTERPRETER")
+      ) {
+        const existing = languages.roots.find(
+          (root) =>
+            root.hostId === parsed!.hostId && root.path === parsed!.path,
+        );
+        const root: Root = {
+          ...existing,
+          ...configuration,
           ...parsed,
-          id: parsed.hostId + ":" + parsed.path,
-          label: base(parsed.path),
+          id: existing?.id || parsed.hostId + ":" + parsed.path,
+          label: existing?.label || base(parsed.path),
           state: "disconnected",
         };
-        setRoots((rs) =>
-          rs.some((r) => r.id === root.id) ? rs : [...rs, root],
-        );
+        languages.roots = existing
+          ? languages.roots.map((item) => (item === existing ? root : item))
+          : [...languages.roots, root];
       }
       fail(e);
+    } finally {
+      setRoots([...languages.roots]);
     }
   }
+  dropFiles.current = (paths) =>
+    openDroppedPaths(paths, {
+      stat: (path) => request("fs.stat", { hostId: "local", path }),
+      contains: (path) => !!ownerOf(languages.roots, "local", path),
+      addRoot: async (path) => {
+        if (!(await addRoot(path)))
+          throw Error("The dropped folder could not be added.");
+      },
+      open: (path) => open("local", path, false),
+    });
   async function openFile() {
     try {
-      const path = await request<string | null>("dialog.open", {
+      const paths = await request<string[] | string | null>("dialog.open", {
         directory: false,
-        multiple: false,
+        multiple: true,
       });
-      if (!path) return;
-      await addRoot(path.slice(0, path.lastIndexOf("/")) || "/");
-      const file = await documents.open("local", path);
-      setTabs((ts) => (ts.includes(file.id) ? ts : [...ts, file.id]));
-      setActive(file.id);
+      if (!paths) return;
+      await dropFiles.current(Array.isArray(paths) ? paths : [paths]);
     } catch (e) {
       fail(e);
     }
@@ -651,7 +795,7 @@ export default function App() {
         };
         if (d.markdownMode !== "preview") {
           d.location = destination;
-          setTimeout(() => editor.current?.restore(destination), 0);
+          setTimeout(() => editor.current?.reveal(destination), 0);
         } else setSourceScroll((scrolls) => ({ ...scrolls, [d.id]: 0 }));
         if (record) history.push(origin, destination);
       }
@@ -1247,6 +1391,14 @@ export default function App() {
                     setModal("add-ssh");
                   },
                 },
+                ...(codespacesSettings.enabled
+                  ? [
+                      {
+                        label: "Add Codespace Folder…",
+                        action: () => setModal("codespaces"),
+                      },
+                    ]
+                  : []),
                 {
                   label: "Open Workspace…",
                   action: async () => {
@@ -1346,7 +1498,7 @@ export default function App() {
           </button>
         </aside>
         {treeVisible && (
-          <aside className="project-island">
+          <ProjectSidebar onCollapse={() => setTreeVisible(false)}>
             <div className="project-header">
               <strong>Project</strong>
               <span />
@@ -1368,107 +1520,105 @@ export default function App() {
             <ProjectTree
               roots={roots}
               selected={doc ? doc.hostId + ":" + doc.path : undefined}
-              onOpen={(h, p, preview) => void open(h, p, preview)}
+              onOpen={(h, p) => void open(h, p, false)}
               onMenu={(e, root, path, folder) =>
                 setMenu({
                   x: e.clientX,
                   y: e.clientY,
-                  items: folder
-                    ? [
-                        {
-                          label: "Find in Files…",
-                          action: () => search(false, { root, path }),
-                        },
-                        {
-                          label: "Replace in Files…",
-                          action: () => search(true, { root, path }),
-                        },
-                        {
-                          label: "Refresh",
-                          action: () => setRoots(roots.map((r) => ({ ...r }))),
-                        },
-                        {
-                          label: "Reconnect",
-                          action: async () => {
-                            try {
-                              await request("remote.connect", {
-                                hostId: root.hostId,
+                  items: [
+                    ...(folder
+                      ? [
+                          {
+                            label: "Find in Files…",
+                            action: () => search(false, { root, path }),
+                          },
+                          {
+                            label: "Replace in Files…",
+                            action: () => search(true, { root, path }),
+                          },
+                          {
+                            label: "Refresh",
+                            action: () =>
+                              setRoots(roots.map((r) => ({ ...r }))),
+                          },
+                          {
+                            label: "Reconnect",
+                            action: async () => {
+                              try {
+                                await request("remote.connect", {
+                                  hostId: root.hostId,
+                                });
+                                await reattachProviderRoots(root.hostId);
+                              } catch (e) {
+                                fail(e);
+                              }
+                            },
+                            disabled:
+                              root.hostId === "local"
+                                ? "Local folder"
+                                : undefined,
+                          },
+                          {
+                            label: "Remove Root from Workspace",
+                            action: () => {
+                              if (
+                                [...documents.documents.values()].some(
+                                  (d) =>
+                                    d.hostId === root.hostId &&
+                                    (d.path === root.path ||
+                                      d.path.startsWith(
+                                        root.path.replace(/\/$/, "") + "/",
+                                      )) &&
+                                    d.dirty,
+                                )
+                              ) {
+                                fail(
+                                  "Save or discard unsaved files in this root before removing it.",
+                                );
+                                return;
+                              }
+                              const detached = tabs.filter((id) => {
+                                const d = documents.documents.get(id);
+                                return !(
+                                  d?.hostId === root.hostId &&
+                                  d.path.startsWith(root.path + "/")
+                                );
                               });
+                              setTabs(detached);
+                              if (!detached.includes(active))
+                                setActive(detached[0] || "");
                               setRoots((rs) =>
-                                rs.map((r) =>
-                                  r.id === root.id
-                                    ? { ...r, state: "ready" }
-                                    : r,
-                                ),
+                                rs.filter((r) => r.id !== root.id),
                               );
-                            } catch (e) {
-                              fail(e);
-                            }
+                              void request("root.remove", {
+                                hostId: root.hostId,
+                                id: root.id,
+                                path: root.path,
+                              });
+                            },
                           },
-                          disabled:
-                            root.hostId === "local"
-                              ? "Local folder"
-                              : undefined,
-                        },
-                        {
-                          label: "Remove Root from Workspace",
-                          action: () => {
-                            if (
-                              [...documents.documents.values()].some(
-                                (d) =>
-                                  d.hostId === root.hostId &&
-                                  (d.path === root.path ||
-                                    d.path.startsWith(
-                                      root.path.replace(/\/$/, "") + "/",
-                                    )) &&
-                                  d.dirty,
-                              )
-                            ) {
-                              fail(
-                                "Save or discard unsaved files in this root before removing it.",
-                              );
-                              return;
-                            }
-                            const detached = tabs.filter((id) => {
-                              const d = documents.documents.get(id);
-                              return !(
-                                d?.hostId === root.hostId &&
-                                d.path.startsWith(root.path + "/")
-                              );
-                            });
-                            setTabs(detached);
-                            if (!detached.includes(active))
-                              setActive(detached[0] || "");
-                            setRoots((rs) =>
-                              rs.filter((r) => r.id !== root.id),
-                            );
-                            void request("root.remove", {
-                              hostId: root.hostId,
-                              id: root.id,
-                              path: root.path,
-                            });
+                        ]
+                      : [
+                          {
+                            label: "Open File",
+                            action: () => void open(root.hostId, path),
                           },
-                        },
-                      ]
-                    : [
-                        {
-                          label: "Open File",
-                          action: () => void open(root.hostId, path),
-                        },
-                        {
-                          label: "Copy File Path",
-                          action: () =>
-                            void navigator.clipboard.writeText(path),
-                        },
-                        {
-                          label: "Rename File…",
-                          action: () => {
-                            setAddPath(base(path));
-                            setModal("rename-file");
-                            (window as any).__renameFile = { root, path };
+                          {
+                            label: "Copy File Path",
+                            action: () =>
+                              void navigator.clipboard.writeText(path),
                           },
-                        },
-                      ],
+                          {
+                            label: "Rename File…",
+                            action: () => {
+                              setAddPath(base(path));
+                              setModal("rename-file");
+                              (window as any).__renameFile = { root, path };
+                            },
+                          },
+                        ]),
+                    ...desktopActions(root, path, folder, fail),
+                  ],
                 })
               }
             />
@@ -1484,7 +1634,7 @@ export default function App() {
                 </button>
               </div>
             )}
-          </aside>
+          </ProjectSidebar>
         )}
         <section className="editor-island">
           <div className="tabbar">
@@ -1542,12 +1692,41 @@ export default function App() {
                     key={id}
                     className={`tab ${active === id ? "active" : ""} ${d.preview ? "preview-tab" : ""}`}
                     draggable
+                    title={
+                      d.pinned
+                        ? "Pinned tab · right-click to unpin"
+                        : "Double-click to pin · drag to reorder"
+                    }
                     onDragStart={() => (dragTab.current = id)}
+                    onDragEnd={() => (dragTab.current = "")}
                     onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => {
-                      const next = tabs.filter((t) => t !== dragTab.current);
-                      next.splice(next.indexOf(id), 0, dragTab.current);
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const dragged = dragTab.current;
+                      if (!dragged || dragged === id || !tabs.includes(dragged))
+                        return;
+                      const next = tabs.filter((t) => t !== dragged);
+                      next.splice(next.indexOf(id), 0, dragged);
+                      dragTab.current = "";
                       setTabs(next);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        items: [
+                          {
+                            label: d.pinned ? "Unpin Tab" : "Pin Tab",
+                            action: () => {
+                              d.pinned = !d.pinned;
+                              d.preview = false;
+                              refresh();
+                            },
+                          },
+                          { label: "Close Tab", action: () => close(id) },
+                        ],
+                      });
                     }}
                     onClick={() => {
                       if (doc) doc.location = capture();
@@ -1559,12 +1738,7 @@ export default function App() {
                       refresh();
                     }}
                   >
-                    <FileCode
-                      size={15}
-                      className={
-                        d.path.endsWith(".py") ? "python-icon" : "code-icon"
-                      }
-                    />
+                    <FileIcon path={d.path} />
                     <span>{base(d.path)}</span>
                     {d.hostId !== "local" && (
                       <small className="host-badge">SSH</small>
@@ -1744,11 +1918,21 @@ export default function App() {
       <footer className="statusbar">
         <button title="Language settings" onClick={() => setModal("settings")}>
           {doc?.path.endsWith(".py")
-            ? settings.interpreter || "Python · project environment"
+            ? languages.interpreterFor(doc) ||
+              (currentRoot
+                ? "Python · auto-detect environment"
+                : "Python · external dependency")
             : doc && /\.[jt]sx?$/.test(doc.path)
               ? "TypeScript language service"
               : "Islet"}
-          {statuses.some((s) => s.status === "starting") ? " · indexing…" : ""}
+          {statuses.some(
+            (s) =>
+              s.status === "starting" &&
+              s.root.id === currentRoot?.id &&
+              s.root.hostId === currentRoot?.hostId,
+          )
+            ? " · indexing…"
+            : ""}
         </button>
         <span className="status-spacer" />
         <span>
@@ -1818,6 +2002,21 @@ export default function App() {
             </button>
           ))}
         </div>
+      )}
+      {modal === "codespaces" && codespacesSettings.enabled && (
+        <CodespacesPanel
+          client={codespaces}
+          onClose={() => setModal(null)}
+          onConnected={reattachProviderRoots}
+          onAdd={async (path, hostId) => {
+            const root = await addRoot(path, hostId);
+            if (!root)
+              throw new Error(
+                "The folder could not be added. Review the connection or folder permissions.",
+              );
+            return root;
+          }}
+        />
       )}
       {(modal === "find-files" || modal === "replace-files") && (
         <SearchDialog
@@ -1941,7 +2140,7 @@ export default function App() {
                   setModal(null);
                 }}
               >
-                <FileCode size={15} />
+                <FileIcon path={location.path} />
                 <span>
                   {location.hostId === "local" ? "Local" : location.hostId} ·{" "}
                   {location.path}:{location.range.start.line + 1}
@@ -2168,27 +2367,39 @@ export default function App() {
             <label>
               Python interpreter for current project
               <input
-                value={settings.interpreter}
+                value={interpreterDraft}
+                disabled={!currentRoot}
                 placeholder="Auto-detect .venv or venv"
-                onChange={(e) =>
-                  setSettings({ ...settings, interpreter: e.target.value })
-                }
+                onChange={(e) => setInterpreterDraft(e.target.value)}
               />
             </label>
+            <p className="muted">
+              {currentRoot
+                ? `${currentRoot.label} · ${currentRoot.hostId} · ${currentRoot.path}`
+                : "Open a file in a project to select its interpreter."}
+            </p>
             <button
+              disabled={!currentRoot}
               onClick={() => {
-                const root = doc
-                  ? ownerOf(roots, doc.hostId, doc.path)
-                  : undefined;
-                if (root) {
-                  root.interpreter = settings.interpreter;
-                  setRoots(roots.map((r) => ({ ...r })));
-                  void languages.restart(root.id).catch(fail);
-                }
+                if (currentRoot)
+                  void addRoot(currentRoot.path, currentRoot.hostId, {
+                    ...currentRoot,
+                    interpreter: interpreterDraft,
+                  });
               }}
             >
               Apply Interpreter and Restart Intelligence
             </button>
+            <TerminalSettings
+              value={settings.terminal}
+              onChange={(terminal) => setSettings({ ...settings, terminal })}
+              onError={fail}
+            />
+            <CodespacesPluginSettings
+              client={codespaces}
+              onError={fail}
+              onManage={() => setModal("codespaces")}
+            />
             <details className="shortcut-settings">
               <summary>Keyboard shortcuts</summary>
               <p className="muted">
@@ -2223,8 +2434,8 @@ export default function App() {
               ))}
             </details>
             <p className="muted">
-              Inter and JetBrains Mono are bundled. Workspace TypeScript and
-              plugins are disabled.
+              Inter and JetBrains Mono are bundled. Optional integrations are
+              managed in Plugins.
             </p>
             <footer>
               <button

@@ -1,0 +1,73 @@
+.project-island.resizable-project {
+  position: relative;
+  flex-shrink: 0;
+  max-width: 60vw;
+  resize: none;
+}
+.resizable-project .project-header {
+  padding-right: 35px;
+  flex-shrink: 0;
+}
+.collapse-project {
+  position: absolute;
+  right: 7px;
+  top: 8px;
+}
+.project-resizer {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  top: 42px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.project-resizer:hover,
+.project-resizer:focus-visible {
+  background: var(--accent);
+  opacity: 0.5;
+}
+.tree {
+  scrollbar-gutter: stable;
+}
+.tree-content {
+  min-width: 100%;
+  width: max-content;
+}
+.tree-content .tree-row {
+  min-width: 100%;
+  padding-right: 10px;
+}
+.tree-content .tree-name {
+  overflow: visible;
+  text-overflow: clip;
+  flex-shrink: 0;
+}
+.tree-content .host-badge {
+  flex-shrink: 0;
+}
+.tree-content .tree-error {
+  max-width: 400px;
+  white-space: normal;
+}
+.terminal-settings {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.terminal-settings h3 {
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+.terminal-settings .terminal-path {
+  display: flex;
+  gap: 6px;
+}
+.terminal-settings .terminal-path input {
+  flex: 1;
+  min-width: 0;
+}
+.terminal-settings .hint {
+  margin: 6px 0;
+}

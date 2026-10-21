@@ -11,7 +11,7 @@ const app = path.join(root, "src-tauri/target/release/bundle/macos/Islet.app");
 const resources = path.join(app, "Contents/Resources");
 const node = path.join(resources, "resources/runtime/node"),
   cli = path.join(resources, "_up_/scripts/islet.mjs");
-await fs.mkdir(path.join(root,"design/validation"),{recursive:true});
+await fs.mkdir(path.join(root, "design/validation"), { recursive: true });
 const data = path.join(root, ".tools/package-test-data");
 const fixture = path.join(root, ".tools/package-test-fixture");
 await fs.rm(data, { recursive: true, force: true });
@@ -68,6 +68,18 @@ try {
     return w.length ? w : null;
   });
   assert.equal(windows[0].id, "main");
+  const dockIcon = await exec(
+    "/usr/bin/swift",
+    [
+      path.join(root, "scripts/verify-dock-icon.swift"),
+      app,
+      String(child.pid),
+      path.join(root, "design/validation/running-app-icon.png"),
+    ],
+    { timeout: 120000 },
+  );
+  assert.equal(JSON.parse(dockIcon.stdout.trim()).dockIconVerified, true);
+  console.log(dockIcon.stdout.trim());
   const handshakeMs = Date.now() - start;
   const added = await run([
     "add",

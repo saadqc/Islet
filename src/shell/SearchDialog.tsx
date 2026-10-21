@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Search, Square } from "lucide-react";
 import { Modal } from "./Modal";
+import { FileIcon } from "../icons/FileIcon";
 import { request, onHostEvent } from "../core/bridge";
 import { Root, isWithin, parseLocation } from "../workspaces/model";
 import { SearchService, type SearchOptions } from "../search/search";
@@ -355,7 +356,7 @@ export function SearchDialog({
                   setBrowsing(false);
                 }}
               >
-                <FolderOpen size={14} />
+                <FileIcon path={f.path} folder />
                 {f.name}
               </button>
             ))}
@@ -538,6 +539,7 @@ export function SearchDialog({
                 }}
               >
                 <span>
+                  <FileIcon path={r.path} />{" "}
                   <b>{r.hostId === "local" ? "Local" : r.hostId}</b> · {r.path}:
                   {r.line ?? 1}
                 </span>

@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { signPreview } from "./sign-preview.mjs";
+import { verifyBundleIcon } from "./app-icon.mjs";
 import {
   archiveFor,
   inspectBinary,
@@ -101,6 +102,7 @@ async function plist(file, key) {
   ).stdout.trim();
 }
 async function validateBundle(app, { arch, version }) {
+  await verifyBundleIcon(app);
   const info = path.join(app, "Contents/Info.plist"),
     executable = await plist(info, "CFBundleExecutable");
   if (executable.includes("/") || executable.includes("\\"))

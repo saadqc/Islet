@@ -45,11 +45,24 @@ The application bundle is written to `src-tauri/target/release/bundle/macos/Isle
 
 Open a folder from the workspace menu; add more local or SSH folders from the Project `+` button. SSH uses system OpenSSH configuration and agent authentication, with native authentication prompts. New remote helper setup requires approval for the displayed host/cache path. Existing compatible helpers can be selected instead.
 
-Double-click a preview tab to pin it. Cmd-click or Cmd+B opens definitions; Alt+F7 shows semantic references; Shift+F6 previews project-wide symbol rename. Back/Forward restore selections and scroll. Line bookmarks have a dedicated gutter. Find/Replace in Files always shows folder and location fields; a blank folder searches the workspace. Replacement and rename changes remain unsaved and offer grouped undo and explicit saving.
+Files open in persistent tabs. Drag tabs to reorder them; double-click or right-click a tab to pin it. Native file drops open multiple files and attach outside parent folders without replacing existing tabs. Cmd/Ctrl-click or Cmd+B opens and reveals definitions; Alt+F7 shows semantic references; Shift+F6 previews project-wide symbol rename. Back/Forward restore selections and scroll, with repeated semantic destinations kept once. Line bookmarks have a dedicated gutter. Find/Replace in Files always shows folder and location fields; a blank folder searches the workspace. Replacement and rename changes remain unsaved and offer grouped undo and explicit saving.
 
 Markdown opens in reading mode. Edit Source preserves the buffer and undo history. Relative images use the owning file provider; network images require explicit opt-in.
 
+The bundled [GitHub Codespaces plugin](docs/CODESPACES.md) is off by default. Enable it in Settings → Plugins to manage cloud environments, attach their folders alongside local and SSH roots, and create expiring localhost forwards using GitHub CLI. Disabling it closes owned connections and forwards without stopping or deleting cloud environments.
+
 The optional `islet` launcher is installed from Settings. See the [CLI specification](docs/REVIEW_WORKSPACES.md#command-line-interface) for multi-folder, workspace-file, and window-targeting examples.
+
+Select Python independently for each local or SSH root with repeatable `--python-interpreter <folder-or-ssh-URI> <absolute-executable>` options:
+
+```sh
+islet open --python-interpreter /work/api /opt/venvs/api/bin/python --python-interpreter ssh://devbox/srv/web /srv/venvs/web/bin/python
+islet add --window WINDOW_ID --python-interpreter /work/api /opt/venvs/other/bin/python
+islet open --workspace example.islet-workspace --python-interpreter /work/api /opt/venvs/api/bin/python
+```
+
+The executable must exist on that root's host. Workspace overrides must match a manifest root. Omitting the option preserves a configured interpreter; an explicit empty `root.interpreter` in a manifest or clearing the current project's interpreter in Settings restores auto-detection. Settings and the status bar follow the current document's root, and changing its interpreter restarts that root's Python intelligence. External applications can supply the same `root.interpreter` manifest field.
+
 
 ## Verify
 

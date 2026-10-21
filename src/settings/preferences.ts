@@ -1,3 +1,7 @@
+export interface TerminalPreference {
+  id: string;
+  path: string;
+}
 export interface Preferences {
   schemaVersion: 1;
   theme: "dark" | "light" | "system";
@@ -11,6 +15,7 @@ export interface Preferences {
   markdownDefault: "preview" | "source";
   uiScale: number;
   interpreter: string;
+  terminal: TerminalPreference;
 }
 export const defaults: Preferences = {
   schemaVersion: 1,
@@ -25,6 +30,7 @@ export const defaults: Preferences = {
   markdownDefault: "preview",
   uiScale: 1,
   interpreter: "",
+  terminal: { id: "system", path: "" },
 };
 export function validatePreferences(value: Partial<Preferences>): Preferences {
   return {
@@ -33,5 +39,9 @@ export function validatePreferences(value: Partial<Preferences>): Preferences {
     fontSize: Math.max(9, Math.min(32, Number(value.fontSize) || 13)),
     lineHeight: Math.max(1.1, Math.min(2.5, Number(value.lineHeight) || 1.55)),
     uiScale: Math.max(0.75, Math.min(1.5, Number(value.uiScale) || 1)),
+    terminal: {
+      id: typeof value.terminal?.id === "string" ? value.terminal.id : "system",
+      path: typeof value.terminal?.path === "string" ? value.terminal.path : "",
+    },
   };
 }

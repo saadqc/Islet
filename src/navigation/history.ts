@@ -3,17 +3,22 @@ export class NavigationHistory {
   entries: LocationSnapshot[] = [];
   index = -1;
   push(origin: LocationSnapshot | undefined, destination: LocationSnapshot) {
+    this.entries = this.entries.slice(0, this.index + 1);
+    const append = (location: LocationSnapshot) => {
+      this.entries = this.entries.filter((entry) => !same(entry, location));
+      this.entries.push({ ...location });
+      this.index = this.entries.length - 1;
+    };
     if (origin) {
       if (this.index < 0 || !same(this.entries[this.index], origin)) {
-        this.entries = this.entries.slice(0, this.index + 1);
-        this.entries.push({ ...origin });
-        this.index++;
+        append(origin);
       } else this.entries[this.index] = { ...origin };
     }
-    if (same(this.entries[this.index], destination)) return;
-    this.entries = this.entries.slice(0, this.index + 1);
-    this.entries.push({ ...destination });
-    this.index = this.entries.length - 1;
+    if (same(this.entries[this.index], destination)) {
+      this.entries[this.index] = { ...destination };
+      return;
+    }
+    append(destination);
   }
   back(current?: LocationSnapshot) {
     if (this.index <= 0) return;
@@ -46,8 +51,8 @@ function same(a: LocationSnapshot | undefined, b: LocationSnapshot) {
     a.mode === b.mode &&
     a.anchor === b.anchor &&
     a.head === b.head &&
-    a.scrollTop === b.scrollTop &&
-    a.scrollLeft === b.scrollLeft
+    (a.mode !== "preview" ||
+      (a.scrollTop === b.scrollTop && a.scrollLeft === b.scrollLeft))
   );
 }
 function map(pos: number, from: number, to: number, inserted: number) {

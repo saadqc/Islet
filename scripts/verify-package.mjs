@@ -4,10 +4,12 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
+import { verifyBundleIcon } from "./app-icon.mjs";
 const exec = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
 const app = path.join(root, "src-tauri/target/release/bundle/macos/Islet.app");
 const resource = path.join(app, "Contents/Resources");
+const appIcon = await verifyBundleIcon(app);
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 async function entry(file) {
   const stat = await fs.stat(file);
@@ -35,6 +37,7 @@ const source = [
   ...helpers,
   ...(await files(path.join(root, "scripts"))),
   ...(await files(path.join(root, "src-tauri/src"))),
+  ...(await files(path.join(root, "src-tauri/icons"))),
   ...[
     "package.json",
     "package-lock.json",
@@ -142,20 +145,18 @@ assert.equal(
 );
 const cliEntry = await entry(cliSource);
 const remoteChecks = [];
+const { version } = JSON.parse(
+  await fs.readFile(path.join(root, "package.json"), "utf8"),
+);
 for (const arch of ["x64", "arm64"]) {
-  const name = `islet-0.1.0-linux-${arch}.tar.gz`;
+  const name = `islet-${version}-linux-${arch}.tar.gz`;
   const archive = path.join(root, "src-tauri/resources/remote", name),
     bundled = path.join(resource, "resources/remote", name);
   assert.equal(
     hash(await fs.readFile(archive)),
     hash(await fs.readFile(bundled)),
   );
-  for (const helper of [
-    "host.mjs",
-    "engine.mjs",
-    "askpass.mjs",
-    "regex-worker.mjs",
-  ]) {
+  for (const helper of helpers.map((file) => path.basename(file))) {
     const extracted = await exec("tar", ["-xOf", archive, "./" + helper], {
       encoding: "buffer",
       maxBuffer: 8 * 1024 * 1024,
@@ -199,6 +200,7 @@ const report = {
   helpers: helperChecks,
   cli: cliEntry,
   remotePackages: remoteChecks,
+  appIcon,
   codeSignature:
     "Locally ad-hoc signed; codesign --verify --deep --strict passed",
   limitations: [
@@ -222,6 +224,7 @@ console.log(
       helpers: helperChecks,
       cli: cliEntry,
       remotePackages: remoteChecks,
+      appIcon,
     },
     null,
     2,

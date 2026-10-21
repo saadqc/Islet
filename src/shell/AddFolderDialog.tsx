@@ -156,10 +156,13 @@ export function AddFolderDialog({
             <p>
               Connect using OpenSSH, your SSH configuration and key agent. A new
               helper installs only in{" "}
-              <b>{target || "the selected host"}:~/.cache/islet/0.1.0</b>. It
-              includes the versioned file helper, Node runtime, basedpyright and
-              TypeScript language service. No root access or permanent daemon is
-              needed.
+              <b>
+                {target || "the selected host"}:~/.cache/islet/
+                {probe?.version || "<version>"}
+              </b>
+              . It includes the versioned file helper, Node runtime,
+              basedpyright and TypeScript language service. No root access or
+              permanent daemon is needed.
             </p>
             {probe && (
               <p>

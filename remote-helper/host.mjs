@@ -1,4 +1,5 @@
 import { Engine, VERSION, errorObject } from "./engine.mjs";
+import { Codespaces, codespaceTransportError } from "./codespaces.mjs";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -16,6 +17,7 @@ export class Host {
     dataDir,
     runtimeDir,
     cli = !remoteMode,
+    codespacesOptions = {},
   } = {}) {
     this.emit = emit;
     this.searchContexts = new Map();
@@ -32,8 +34,14 @@ export class Host {
     this.remoteRootIds = new Map();
     this.cli = cli;
     this.closing = false;
+    this.codespaces = new Codespaces(this, {
+      ...codespacesOptions,
+      allowEnable: !remoteMode && codespacesOptions.allowEnable !== false,
+    });
   }
   async request(operation, p = {}) {
+    if (operation.startsWith("codespaces."))
+      return this.codespaces.request(operation.slice("codespaces.".length), p);
     if (operation === "remote.aliases") return this.aliases();
     if (operation === "remote.probe") return this.probe(p);
     if (operation === "remote.setup") return this.setup(p);
@@ -195,6 +203,7 @@ export class Host {
     }));
   }
   config(p) {
+    if (p.hostId?.startsWith("codespace:")) return this.codespaces.config(p);
     let target = p.target || String(p.hostId || "").replace(/^ssh:/, "");
     let parsedPort = p.port;
     if (!parsedPort) {
@@ -335,12 +344,17 @@ export class Host {
     };
   }
   async runSsh(config, command, { input, timeout = 30000 } = {}) {
+    if (config.codespaceId)
+      await this.codespaces.ensureTransport(config.codespaceId);
     const env = await this.sshEnvironment(config);
     return new Promise((resolve, reject) => {
-      const proc = spawn("/usr/bin/ssh", [...this.sshArgs(config), command], {
+      const options = {
         stdio: ["pipe", "pipe", "pipe"],
         env,
-      });
+      };
+      const proc = config.codespaceId
+        ? this.codespaces.spawnSsh(config, command, options)
+        : spawn("/usr/bin/ssh", [...this.sshArgs(config), command], options);
       let stdout = "",
         stderr = "";
       const timer = setTimeout(() => {
@@ -359,24 +373,36 @@ export class Host {
         }
       });
       proc.stderr.on("data", (d) => {
-        stderr += d;
+        stderr = (stderr + d).slice(-8000);
       });
       proc.on("error", reject);
       proc.on("exit", (code) => {
         clearTimeout(timer);
+        const providerError = config.codespaceId
+          ? codespaceTransportError(stderr)
+          : null;
         code === 0
           ? resolve(stdout)
           : reject(
-              Object.assign(new Error(sshError(stderr)), {
-                code: classifySsh(stderr),
-                details: { stderr: stderr.slice(0, 8000) },
-              }),
+              Object.assign(
+                new Error(providerError?.message || sshError(stderr)),
+                {
+                  code: providerError?.code || classifySsh(stderr),
+                  ...(providerError
+                    ? {}
+                    : { details: { stderr: stderr.slice(0, 8000) } }),
+                },
+              ),
             );
       });
       proc.stdin.end(input);
     });
   }
   async probe(p) {
+    if (p.hostId?.startsWith("codespace:"))
+      await this.codespaces.ensureTransport(
+        p.hostId.slice("codespace:".length),
+      );
     const config = this.config(p);
     const code =
       "import os,sys,json,platform,shutil; p=os.path.expanduser('~/.cache/islet'); a=os.path.expanduser('~'); print(json.dumps({'os':platform.system(),'arch':platform.machine(),'python':sys.version.split()[0],'freeBytes':shutil.disk_usage(a).free,'cachePath':p,'writable':os.access(a,os.W_OK),'helperInstalled':os.path.isfile(p+'/" +
@@ -394,6 +420,10 @@ export class Host {
     };
   }
   async setup(p) {
+    if (p.hostId?.startsWith("codespace:"))
+      await this.codespaces.ensureTransport(
+        p.hostId.slice("codespace:".length),
+      );
     const config = this.config(p);
     if (!p.approve)
       throw Object.assign(
@@ -445,6 +475,10 @@ export class Host {
     return this.connect(config);
   }
   async connect(p) {
+    if (p.hostId?.startsWith("codespace:"))
+      await this.codespaces.ensureTransport(
+        p.hostId.slice("codespace:".length),
+      );
     const config = this.config(p);
     await this.disconnect(config.hostId);
     this.remoteConfigs.set(config.hostId, config);
@@ -460,12 +494,18 @@ export class Host {
       ? `${quote(config.systemNode || "node")} ${quote(path.posix.join(helper, "host.mjs"))} --remote`
       : `exec "$HOME/.cache/islet/${VERSION}/node" "$HOME/.cache/islet/${VERSION}/host.mjs" --remote`;
     const env = await this.sshEnvironment(config);
-    const child = spawn("/usr/bin/ssh", [...this.sshArgs(config), command], {
+    const options = {
       stdio: ["pipe", "pipe", "pipe"],
       env,
-    });
+    };
+    const child = config.codespaceId
+      ? this.codespaces.spawnSsh(config, command, options)
+      : spawn("/usr/bin/ssh", [...this.sshArgs(config), command], options);
     const channel = new Channel(child, {
       hostId: config.hostId,
+      formatError: config.codespaceId
+        ? (stderr) => codespaceTransportError(stderr).message
+        : sshError,
       emit: (name, event) => {
         if (name === "lsp-message")
           event = {
@@ -528,6 +568,7 @@ export class Host {
     }
   }
   async remoteRequest(hostId, operation, p) {
+    if (hostId.startsWith("codespace:")) await this.codespaces.enabled();
     let channel = this.connections.get(hostId);
     if (!channel && operation === "root.open") {
       await this.connect(this.remoteConfigs.get(hostId) || { hostId });
@@ -832,6 +873,7 @@ export class Host {
   async close() {
     if (this.closing) return;
     this.closing = true;
+    await this.codespaces.close();
     await Promise.all(
       [...this.connections.keys()].map((id) => this.disconnect(id)),
     );
@@ -848,7 +890,7 @@ export class Host {
   }
 }
 class Channel {
-  constructor(child, { hostId, emit, onClose }) {
+  constructor(child, { hostId, emit, onClose, formatError = sshError }) {
     this.child = child;
     this.hostId = hostId;
     this.emit = emit;
@@ -898,7 +940,7 @@ class Channel {
     child.stderr.on("data", (d) => (stderr = (stderr + d).slice(-8000)));
     child.on("error", (e) => this.fail(e.message));
     child.on("exit", () =>
-      this.fail(sshError(stderr) || "SSH channel closed."),
+      this.fail(formatError(stderr) || "SSH channel closed."),
     );
   }
   request(operation, payload, timeout = 30000) {

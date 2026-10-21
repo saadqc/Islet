@@ -1,12 +1,6 @@
 import { useEffect, useState } from "react";
-import {
-  ChevronRight,
-  ChevronDown,
-  Folder,
-  FileCode,
-  FileText,
-  RefreshCw,
-} from "lucide-react";
+import { ChevronRight, ChevronDown, RefreshCw } from "lucide-react";
+import { FileIcon } from "../icons/FileIcon";
 import { request } from "../core/bridge";
 import { Root, Entry, base } from "../workspaces/model";
 function Node({
@@ -71,16 +65,7 @@ function Node({
             )
           ) : null}
         </span>
-        {folder ? (
-          <Folder size={16} />
-        ) : name.endsWith(".md") ? (
-          <FileText size={15} />
-        ) : (
-          <FileCode
-            size={15}
-            className={name.endsWith(".py") ? "python-icon" : "code-icon"}
-          />
-        )}
+        <FileIcon path={path} folder={folder} />
         <span className="tree-name">{name}</span>
         {depth === 0 && root.hostId !== "local" && (
           <small className="host-badge">SSH</small>
@@ -150,22 +135,24 @@ export function ProjectTree({
 }) {
   return (
     <div className="tree" role="tree" aria-label="Workspace projects">
-      {roots.map((root) => (
-        <div key={root.id}>
-          <Node
-            root={root}
-            path={root.path}
-            name={root.label || base(root.path)}
-            depth={0}
-            onOpen={onOpen}
-            onMenu={onMenu}
-            selected={selected}
-          />
-          {root.state && root.state !== "ready" && (
-            <div className="connection-state">{root.state}</div>
-          )}
-        </div>
-      ))}
+      <div className="tree-content">
+        {roots.map((root) => (
+          <div key={root.id}>
+            <Node
+              root={root}
+              path={root.path}
+              name={root.label || base(root.path)}
+              depth={0}
+              onOpen={onOpen}
+              onMenu={onMenu}
+              selected={selected}
+            />
+            {root.state && root.state !== "ready" && (
+              <div className="connection-state">{root.state}</div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

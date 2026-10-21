@@ -52,6 +52,7 @@ export class LanguageManager {
   documents?: DocumentStore;
   private connecting?: Promise<void>;
   private starting = new Map<string, Promise<Session | undefined>>();
+  private generations = new Map<string, number>();
   constructor(public transport: Request = request) {}
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
@@ -232,13 +233,15 @@ export class LanguageManager {
       root.hostId,
       root.id,
       language,
-      root.interpreter || "",
+      language === "python" ? root.interpreter || "" : "",
     ]);
     let pending = this.starting.get(key);
     if (!pending) {
       pending = this.createSession(root, document);
       this.starting.set(key, pending);
-      pending.catch(() => this.starting.delete(key));
+      pending.catch(() => {
+        if (this.starting.get(key) === pending) this.starting.delete(key);
+      });
     }
     const session = await pending;
     if (session && document) await this.sync(session, document);
@@ -250,21 +253,29 @@ export class LanguageManager {
   ): Promise<Session | undefined> {
     const language = document ? languageFor(document.path) : "python";
     if (!language) return;
+    const generationKey = JSON.stringify([root.hostId, root.id, language]);
+    const generation = this.generations.get(generationKey) || 0;
     await this.connect();
     const key = JSON.stringify([
       root.hostId,
       root.id,
       language,
-      root.interpreter || "",
+      language === "python" ? root.interpreter || "" : "",
     ]);
     let session = this.sessions.get(key);
     if (!session) {
       const start = await this.transport("lsp.start", {
         root,
         language,
-        interpreter: root.interpreter,
+        interpreter: language === "python" ? root.interpreter : undefined,
         clientId: this.clientId,
       });
+      if ((this.generations.get(generationKey) || 0) !== generation) {
+        await this.transport("lsp.stop", { sessionId: start.sessionId }).catch(
+          () => {},
+        );
+        throw new Error("Language intelligence restarted");
+      }
       session = {
         sessionId: start.sessionId,
         root: { ...root, interpreter: root.interpreter || start.interpreter },
@@ -328,6 +339,8 @@ export class LanguageManager {
       })();
     }
     await session.ready;
+    if ((this.generations.get(generationKey) || 0) !== generation)
+      throw new Error("Language intelligence restarted");
     if (document) await this.sync(session, document);
     return session;
   }
@@ -506,13 +519,70 @@ export class LanguageManager {
     this.unsubscribe = undefined;
     this.connecting = undefined;
   }
-  async restart(rootId?: string) {
-    for (const [key, s] of this.sessions) {
-      if (!rootId || s.root.id === rootId) {
-        await this.transport("lsp.stop", { sessionId: s.sessionId });
-        this.sessions.delete(key);
+  interpreterFor(document: DocumentModel): string | undefined {
+    const root = ownerOf(this.roots, document.hostId, document.path);
+    if (!root) return;
+    if (root.interpreter) return root.interpreter;
+    const key = JSON.stringify([root.hostId, root.id, "python", ""]);
+    return this.sessions.get(key)?.root.interpreter;
+  }
+  async updateRoot(root: Root) {
+    const previous = this.roots.find(
+      (item) => item.hostId === root.hostId && item.path === root.path,
+    );
+    this.roots = previous
+      ? this.roots.map((item) => (item === previous ? root : item))
+      : [...this.roots, root];
+    if (previous && (previous.interpreter || "") !== (root.interpreter || "")) {
+      await this.restart(previous.id, "python", previous.hostId);
+      const documents = [...(this.documents?.documents.values() || [])].filter(
+        (document) =>
+          languageFor(document.path) === "python" &&
+          ownerOf(this.roots, document.hostId, document.path) === root,
+      );
+      await Promise.all(
+        documents.map((document) => this.ensure(root, document)),
+      );
+    }
+    this.emit();
+  }
+  async restart(rootId?: string, language?: string, hostId?: string) {
+    const matches = (host: string, id: string, kind: string) =>
+      (!rootId || id === rootId) &&
+      (!language || kind === language) &&
+      (!hostId || host === hostId);
+    const targets = new Set<string>();
+    for (const root of this.roots)
+      for (const kind of ["python", "javascript"])
+        if (matches(root.hostId, root.id, kind))
+          targets.add(JSON.stringify([root.hostId, root.id, kind]));
+    for (const key of [...this.starting.keys(), ...this.sessions.keys()]) {
+      const [host, id, kind] = JSON.parse(key);
+      if (matches(host, id, kind)) {
+        targets.add(JSON.stringify([host, id, kind]));
         this.starting.delete(key);
       }
+    }
+    for (const key of targets)
+      this.generations.set(key, (this.generations.get(key) || 0) + 1);
+    for (const [key, session] of [...this.sessions]) {
+      if (!matches(session.root.hostId, session.root.id, session.language))
+        continue;
+      this.sessions.delete(key);
+      for (const pending of session.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Language intelligence restarted"));
+      }
+      session.pending.clear();
+      await this.transport("lsp.stop", { sessionId: session.sessionId });
+    }
+    for (const document of this.documents?.documents.values() || []) {
+      const root = ownerOf(this.roots, document.hostId, document.path);
+      if (
+        root &&
+        matches(root.hostId, root.id, languageFor(document.path) || "")
+      )
+        this.diagnostics.delete(document.id);
     }
     this.emit();
   }

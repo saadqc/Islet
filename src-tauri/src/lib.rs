@@ -12,6 +12,7 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
+mod desktop;
 
 type Reply = Result<Value, String>;
 struct HostState {
@@ -152,6 +153,11 @@ async fn host_request(
         object
             .entry("clientId")
             .or_insert_with(|| json!(window.label()));
+    }
+    if operation.starts_with("desktop.") {
+        return tauri::async_runtime::spawn_blocking(move || desktop::handle(&operation, &p))
+            .await
+            .map_err(|e| e.to_string())?;
     }
     if operation == "dialog.open" || operation == "dialog.save" {
         let op = operation.clone();

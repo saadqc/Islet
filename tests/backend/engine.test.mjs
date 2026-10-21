@@ -12,6 +12,12 @@ import {
 import { Host } from "../../remote-helper/host.mjs";
 import { parseArgs } from "../../scripts/islet.mjs";
 const temp = () => fs.mkdtemp(path.join(os.tmpdir(), "islet-backend-"));
+async function interpreterFixture(dir, name = "python") {
+  const executable = path.join(dir, name);
+  await fs.mkdir(path.dirname(executable), { recursive: true });
+  await fs.writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return executable;
+}
 async function fixture(t) {
   const dir = await fs.realpath(await temp());
   const engine = new Engine({ dataDir: path.join(dir, ".data") });
@@ -172,6 +178,343 @@ test("workspace manifests resolve relative local paths and remove secrets", asyn
     (await engine.request("workspace.load", { path: target })).roots[0].path,
     path.join(dir, "project"),
   );
+});
+test("CLI interpreter selectors merge local and SSH roots without crossing host identity", () => {
+  const parsed = parseArgs(
+    [
+      "add",
+      "--window",
+      "main",
+      "./one",
+      "ssh://user@HOST:2222/srv/a%20b/./",
+      "--python-interpreter",
+      "one/.",
+      "/envs/one/bin/python",
+      "--python-interpreter",
+      "two",
+      "/envs/two/bin/python",
+      "--python-interpreter",
+      "SSH://user@host:2222/srv/a%20b",
+      "/remote/env/bin/python",
+      "--python-interpreter",
+      "ssh://user@host:2223/srv/a%20b",
+      "/other/env/bin/python",
+      "--python-interpreter",
+      "one",
+      "/envs/one/bin/python",
+    ],
+    "/projects",
+  );
+  assert.equal(parsed.errors.length, 0);
+  assert.equal(parsed.roots.length, 4);
+  assert.deepEqual(
+    parsed.roots.map(({ hostId, path, interpreter }) => ({
+      hostId,
+      path,
+      interpreter,
+    })),
+    [
+      {
+        hostId: "local",
+        path: "/projects/one",
+        interpreter: "/envs/one/bin/python",
+      },
+      {
+        hostId: "ssh:user@host:2222",
+        path: "/srv/a b",
+        interpreter: "/remote/env/bin/python",
+      },
+      {
+        hostId: "local",
+        path: "/projects/two",
+        interpreter: "/envs/two/bin/python",
+      },
+      {
+        hostId: "ssh:user@host:2223",
+        path: "/srv/a b",
+        interpreter: "/other/env/bin/python",
+      },
+    ],
+  );
+  assert.equal("interpreterOverrides" in parsed, false);
+  const ipv6 = parseArgs(
+    [
+      "--python-interpreter",
+      "ssh://user@[::1]:2222/srv/project",
+      "/env/bin/python",
+    ],
+    "/projects",
+  );
+  assert.equal(ipv6.roots[0].hostId, "ssh:user@[::1]:2222");
+});
+test("CLI workspace interpreter overrides do not add selector roots and reject ambiguous options", () => {
+  const parsed = parseArgs(
+    [
+      "--workspace",
+      "named.islet-workspace",
+      "--python-interpreter",
+      "one",
+      "/env/bin/python",
+      "--python-interpreter",
+      "ssh://host/srv/project",
+      "/remote/bin/python",
+    ],
+    "/projects",
+  );
+  assert.deepEqual(parsed.roots, []);
+  assert.deepEqual(parsed.interpreterOverrides, [
+    { hostId: "local", path: "/projects/one", interpreter: "/env/bin/python" },
+    {
+      hostId: "ssh:host",
+      path: "/srv/project",
+      interpreter: "/remote/bin/python",
+    },
+  ]);
+  for (const args of [
+    ["--python-interpreter"],
+    ["--workspace", "--python-interpreter", "one", "/env/python"],
+    ["--window", "--python-interpreter", "one", "/env/python"],
+    ["--python-interpreter", "one"],
+    ["--python-interpreter", "one", ""],
+    ["--python-interpreter", "one", "relative/python"],
+    ["--python-interpreter", "one", "C:\\env\\python.exe"],
+    ["--python-interpreter", "one", "/env/py\0thon"],
+    ["--python-interpreter", "C:\\projects\\one", "/env/python"],
+    [
+      "--python-interpreter",
+      "ssh://user%40other@host/srv/project",
+      "/env/python",
+    ],
+    ["--python-interpreter", "ssh://host/srv/%00", "/env/python"],
+    ["windows", "--python-interpreter", "one", "/env/python"],
+    [
+      "--python-interpreter",
+      "one",
+      "/env/python",
+      "--python-interpreter",
+      "./one",
+      "/other/python",
+    ],
+  ])
+    assert.throws(() => parseArgs(args, "/projects"));
+});
+test("root interpreter config is preserved per client and reset without leaking across windows", async (t) => {
+  const { dir, engine } = await fixture(t);
+  const selected = await interpreterFixture(dir, "selected/bin/python");
+  const automatic = await interpreterFixture(dir, ".venv/bin/python");
+  const first = await engine.openRoot({
+    path: dir,
+    id: "configured-one",
+    clientId: "one",
+    interpreter: selected,
+  });
+  assert.equal(first.interpreter, selected);
+  assert.equal(
+    (await engine.openRoot({ path: dir, clientId: "one" })).interpreter,
+    selected,
+  );
+  assert.equal(
+    "interpreter" in (await engine.openRoot({ path: dir, clientId: "two" })),
+    false,
+  );
+  assert.equal("interpreter" in engine.roots.get(first.id), false);
+  const a = await engine.startService({
+    rootPath: dir,
+    language: "python",
+    clientId: "one",
+  });
+  const b = await engine.startService({
+    rootPath: dir,
+    language: "python",
+    clientId: "two",
+  });
+  assert.equal(a.interpreter, selected);
+  assert.equal(b.interpreter, automatic);
+  assert.notEqual(a.sessionId, b.sessionId);
+  assert.equal(
+    (await engine.openRoot({ path: dir, clientId: "one", interpreter: "" }))
+      .interpreter,
+    "",
+  );
+  assert.equal(
+    (await engine.openRoot({ path: dir, clientId: "one" })).interpreter,
+    "",
+  );
+  await engine.removeRoot({ id: first.id, clientId: "one" });
+  assert.equal(
+    "interpreter" in (await engine.openRoot({ path: dir, clientId: "one" })),
+    false,
+  );
+  assert.equal(engine.services.has(b.sessionId), true);
+});
+test("explicit interpreter validation rejects relative, missing, directory and nonexecutable paths atomically", async (t) => {
+  const { dir, engine } = await fixture(t);
+  const selected = await interpreterFixture(dir, "selected-python");
+  const nonexec = path.join(dir, "nonexec");
+  await fs.writeFile(nonexec, "not executable", { mode: 0o644 });
+  const root = await engine.openRoot({
+    path: dir,
+    clientId: "one",
+    interpreter: selected,
+  });
+  for (const interpreter of [
+    "relative/python",
+    "C:\\env\\python.exe",
+    "/bad\0python",
+    path.join(dir, "missing"),
+    dir,
+    nonexec,
+    null,
+    42,
+  ]) {
+    await assert.rejects(
+      engine.openRoot({ path: dir, clientId: "one", interpreter }),
+      { code: "INVALID_INTERPRETER" },
+    );
+    assert.equal(
+      engine.rootConfigs.get(root.id).get("one").interpreter,
+      selected,
+    );
+  }
+  await fs.chmod(selected, 0o644);
+  await assert.rejects(engine.openRoot({ path: dir, clientId: "one" }), {
+    code: "INVALID_INTERPRETER",
+  });
+  const remote = new Engine({
+    dataDir: path.join(dir, "remote-data"),
+    hostId: "ssh:fixture",
+  });
+  t.after(() => remote.close());
+  await assert.rejects(
+    remote.openRoot({
+      path: dir,
+      interpreter: path.join(dir, "missing-remote"),
+    }),
+    { code: "INVALID_INTERPRETER" },
+  );
+  await fs.chmod(selected, 0o755);
+  assert.equal(
+    (await remote.openRoot({ path: dir, interpreter: selected })).interpreter,
+    selected,
+  );
+});
+test("workspace interpreter overrides match manifest roots atomically and preserve explicit auto reset", async (t) => {
+  const { dir, engine } = await fixture(t),
+    file = path.join(dir, "interpreters.islet-workspace");
+  const value = {
+    schemaVersion: 1,
+    roots: [
+      { hostId: "local", path: "project", interpreter: "" },
+      {
+        hostId: "ssh:fixture",
+        path: "/srv/project",
+        interpreter: "/remote/old/python",
+      },
+    ],
+  };
+  await engine.saveWorkspace({ path: file, value });
+  const before = await fs.readFile(file, "utf8"),
+    rootCount = engine.roots.size;
+  const loaded = await engine.loadWorkspace({
+    path: file,
+    interpreterOverrides: [
+      {
+        hostId: "local",
+        path: path.join(dir, "project/./"),
+        interpreter: "/env/local/python",
+      },
+      {
+        hostId: "ssh:fixture",
+        path: "/srv/project/.",
+        interpreter: "/remote/new/python",
+      },
+    ],
+  });
+  assert.deepEqual(
+    loaded.roots.map((r) => r.interpreter),
+    ["/env/local/python", "/remote/new/python"],
+  );
+  assert.equal(
+    (await engine.loadWorkspace({ path: file })).roots[0].interpreter,
+    "",
+  );
+  const reset = await engine.loadWorkspace({
+    path: file,
+    interpreterOverrides: [
+      { hostId: "ssh:fixture", path: "/srv/project", interpreter: "" },
+    ],
+  });
+  assert.equal(reset.roots[1].interpreter, "");
+  await assert.rejects(
+    engine.loadWorkspace({ path: file, interpreterOverrides: null }),
+    { code: "INVALID_INTERPRETER" },
+  );
+  await assert.rejects(
+    engine.loadWorkspace({
+      path: file,
+      interpreterOverrides: [
+        {
+          hostId: "local",
+          path: path.join(dir, "project"),
+          interpreter: "/env/python",
+        },
+        {
+          hostId: "ssh:other-host",
+          path: "/srv/project",
+          interpreter: "/env/python",
+        },
+      ],
+    }),
+    { code: "INTERPRETER_ROOT_NOT_FOUND" },
+  );
+  await assert.rejects(
+    engine.loadWorkspace({
+      path: file,
+      interpreterOverrides: [
+        {
+          hostId: "local",
+          path: path.join(dir, "project"),
+          interpreter: "/one/python",
+        },
+        {
+          hostId: "local",
+          path: path.join(dir, "project"),
+          interpreter: "/two/python",
+        },
+      ],
+    }),
+    { code: "INVALID_INTERPRETER" },
+  );
+  assert.equal(await fs.readFile(file, "utf8"), before);
+  assert.equal(engine.roots.size, rootCount);
+  for (const hostId of ["local", "ssh:fixture"])
+    for (const interpreter of [
+      "relative/python",
+      "C:\\env\\python.exe",
+      "/bad\0python",
+      null,
+      42,
+    ]) {
+      const bad = {
+        schemaVersion: 1,
+        roots: [
+          {
+            hostId,
+            path: hostId === "local" ? dir : "/srv/project",
+            interpreter,
+          },
+        ],
+      };
+      await assert.rejects(engine.saveWorkspace({ path: file, value: bad }), {
+        code: "INVALID_INTERPRETER",
+      });
+      assert.equal(await fs.readFile(file, "utf8"), before);
+      await fs.writeFile(file, JSON.stringify(bad));
+      await assert.rejects(engine.loadWorkspace({ path: file }), {
+        code: "INVALID_INTERPRETER",
+      });
+      await fs.writeFile(file, before);
+    }
 });
 test("CLI normalization, malformed URI errors and deterministic window routing", async (t) => {
   const parsed = parseArgs(

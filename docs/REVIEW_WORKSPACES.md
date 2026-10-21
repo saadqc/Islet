@@ -169,6 +169,10 @@ Use a local authenticated single-instance IPC channel for delivery, and a struct
 
 An `.islet-workspace` manifest stores `schemaVersion`, workspace ID/name, ordered root descriptors and non-secret preferences. Remote roots reference SSH aliases/profiles, never passwords or private-key contents. Local relative paths resolve against the manifest location; remote paths are absolute on their owning host. Session state, bookmarks, and recovery remain in app data keyed by workspace ID.
 
+
+Python interpreter handoff uses repeatable `--python-interpreter <folder-or-ssh-URI> <absolute-executable>`. Each selector identifies a root to open/add, so multi-root and mixed-host requests are unambiguous. With `open --workspace`, selectors override only existing manifest roots; an unmatched selector is an error. Paths must be absolute executable files on the owning host; no shell arguments or environment variables are interpreted. External launchers can set the existing per-root `interpreter` manifest field directly. Omission preserves the current choice, while an explicit empty string selects automatic environment detection. Configuration is isolated per window/root. Changes restart that root's Python services and synchronize open buffers; other roots and JavaScript sessions remain active.
+
+
 ## Markdown reading and editing
 
 Open `.md` and `.markdown` files in **Preview** by default. Provide a persistent **Edit Source** button; source mode is the normal CodeMirror editor with a **Preview** button in the same place. Remember an explicit per-document choice across tab/session restoration and offer a global default setting.

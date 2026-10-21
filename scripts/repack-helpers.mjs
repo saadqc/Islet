@@ -3,15 +3,15 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 const root = path.resolve(import.meta.dirname, "..");
+const { version } = JSON.parse(
+  await fs.readFile(path.join(root, "package.json"), "utf8"),
+);
 for (const arch of ["x64", "arm64"]) {
   const stage = path.join(root, ".tools", "remote-" + arch);
   await fs.access(path.join(stage, "node"));
-  for (const name of [
-    "host.mjs",
-    "engine.mjs",
-    "askpass.mjs",
-    "regex-worker.mjs",
-  ])
+  for (const name of (
+    await fs.readdir(path.join(root, "remote-helper"))
+  ).filter((name) => name.endsWith(".mjs")))
     await fs.copyFile(
       path.join(root, "remote-helper", name),
       path.join(stage, name),
@@ -19,7 +19,7 @@ for (const arch of ["x64", "arm64"]) {
   const target = path.join(
     root,
     "src-tauri/resources/remote",
-    `islet-0.1.0-linux-${arch}.tar.gz`,
+    `islet-${version}-linux-${arch}.tar.gz`,
   );
   await new Promise((resolve, reject) => {
     const p = spawn("tar", ["-czf", target, "-C", stage, "."], {

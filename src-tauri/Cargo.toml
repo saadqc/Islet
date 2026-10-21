@@ -1,6 +1,6 @@
 [package]
 name = "islet"
-version = "0.1.0"
+version = "0.1.1"
 description = "A focused desktop code editor"
 authors = ["Islet contributors"]
 edition = "2021"

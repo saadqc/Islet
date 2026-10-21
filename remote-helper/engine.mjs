@@ -7,13 +7,28 @@ import { Worker } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 const inside = (file, root) =>
   file === root || file.startsWith(root + path.sep);
 const fail = (code, message, details) => {
   throw Object.assign(new Error(message), { code, details });
 };
+function validateInterpreterSyntax(value, hostId = "local") {
+  if (value === undefined) return;
+  if (
+    typeof value !== "string" ||
+    value.includes("\0") ||
+    (value !== "" &&
+      !(hostId === "local"
+        ? path.isAbsolute(value)
+        : path.posix.isAbsolute(value)))
+  )
+    fail(
+      "INVALID_INTERPRETER",
+      "Python interpreter must be an absolute executable path on its host, or an empty string for automatic selection.",
+    );
+}
 const ignoredNames = new Set([
   "node_modules",
   ".git",
@@ -60,6 +75,7 @@ export class Engine {
     this.hostId = hostId;
     this.roots = new Map();
     this.rootOwners = new Map();
+    this.rootConfigs = new Map();
     this.sessionIndexQueue = Promise.resolve();
     this.documents = new Map();
     this.services = new Map();
@@ -213,18 +229,48 @@ export class Engine {
     const canonical = await this.canonical(p.path);
     const s = await fs.stat(canonical);
     if (!s.isDirectory()) fail("NOT_DIRECTORY", "Choose a directory.");
+    const clientId = p.clientId || "default";
+    const existing = [...this.roots.values()].find(
+      (root) =>
+        root.path === canonical && this.rootOwners.get(root.id)?.has(clientId),
+    );
     const root = {
-      id: p.id || hash(`${this.hostId}\0${canonical}`).slice(0, 20),
+      id:
+        p.id ||
+        existing?.id ||
+        hash(`${this.hostId}\0${canonical}`).slice(0, 20),
       hostId: this.hostId,
       path: canonical,
       label: p.label || path.basename(canonical) || canonical,
       state: "ready",
     };
+    const configurations = this.rootConfigs.get(root.id) || new Map();
+    const configuration =
+      p.interpreter === undefined
+        ? configurations.get(clientId) || {}
+        : { interpreter: p.interpreter };
+    await this.validateInterpreter(configuration.interpreter);
     this.roots.set(root.id, root);
     const owners = this.rootOwners.get(root.id) || new Set();
-    owners.add(p.clientId || "default");
+    owners.add(clientId);
     this.rootOwners.set(root.id, owners);
-    return root;
+    configurations.set(clientId, configuration);
+    this.rootConfigs.set(root.id, configurations);
+    return { ...root, ...configuration };
+  }
+  async validateInterpreter(interpreter) {
+    validateInterpreterSyntax(interpreter, this.hostId);
+    if (interpreter === undefined || interpreter === "") return;
+    try {
+      if (!(await fs.stat(interpreter)).isFile())
+        throw new Error("Not a regular file.");
+      await fs.access(interpreter, fsSync.constants.X_OK);
+    } catch {
+      fail(
+        "INVALID_INTERPRETER",
+        "The selected Python interpreter must exist and be an executable file on this host.",
+      );
+    }
   }
   async removeRoot(p) {
     const root =
@@ -234,6 +280,7 @@ export class Engine {
     const owners = this.rootOwners.get(root.id);
     if (p.clientId && owners && !owners.has(p.clientId)) return true;
     if (p.clientId) owners?.delete(p.clientId);
+    if (p.clientId) this.rootConfigs.get(root.id)?.delete(p.clientId);
     await Promise.all(
       [...this.services.values()]
         .filter(
@@ -245,6 +292,7 @@ export class Engine {
     );
     if (p.clientId && owners?.size) return true;
     this.rootOwners.delete(root.id);
+    this.rootConfigs.delete(root.id);
     for (const [file, watcher] of this.watchers) {
       if (inside(file, root.path)) {
         watcher.close();
@@ -569,7 +617,64 @@ export class Engine {
         fail("WORKSPACE_SECRET", "Workspace files cannot contain credentials.");
       if (r.hostId === "local" && !path.isAbsolute(r.path))
         r.path = path.resolve(path.dirname(file), r.path);
+      validateInterpreterSyntax(r.interpreter, r.hostId || "local");
     }
+    const overrides =
+      p.interpreterOverrides === undefined ? [] : p.interpreterOverrides;
+    if (!Array.isArray(overrides))
+      fail("INVALID_INTERPRETER", "Interpreter overrides must be a list.");
+    const bindings = new Map();
+    for (const override of overrides) {
+      if (
+        !override ||
+        typeof override.path !== "string" ||
+        override.path.includes("\0") ||
+        !(override.hostId === "local"
+          ? path.isAbsolute(override.path)
+          : path.posix.isAbsolute(override.path))
+      )
+        fail(
+          "INVALID_INTERPRETER",
+          "Interpreter override requires a host and absolute root path.",
+        );
+      if (
+        typeof override.hostId !== "string" ||
+        !override.hostId ||
+        override.interpreter === undefined
+      )
+        fail(
+          "INVALID_INTERPRETER",
+          "Interpreter override requires a host and interpreter.",
+        );
+      validateInterpreterSyntax(override.interpreter, override.hostId);
+      const normalize =
+        override.hostId === "local"
+          ? path.resolve
+          : (file) => path.posix.normalize(file).replace(/\/+$/, "") || "/";
+      const rootPath = normalize(override.path);
+      const matches = manifest.roots.filter(
+        (r) =>
+          (r.hostId || "local") === override.hostId &&
+          normalize(r.path) === rootPath,
+      );
+      if (!matches.length)
+        fail(
+          "INTERPRETER_ROOT_NOT_FOUND",
+          "Python interpreter override does not match a root in this workspace.",
+        );
+      const key = JSON.stringify([override.hostId, rootPath]);
+      if (
+        bindings.has(key) &&
+        bindings.get(key).interpreter !== override.interpreter
+      )
+        fail(
+          "INVALID_INTERPRETER",
+          "Conflicting Python interpreter overrides for the same root.",
+        );
+      bindings.set(key, { matches, interpreter: override.interpreter });
+    }
+    for (const { matches, interpreter } of bindings.values())
+      for (const root of matches) root.interpreter = interpreter;
     return { ...manifest, manifestPath: file };
   }
   async saveWorkspace(p) {
@@ -581,6 +686,7 @@ export class Engine {
       fail("INVALID_WORKSPACE", "Invalid workspace manifest.");
     const safe = JSON.parse(JSON.stringify(p.value));
     for (const r of safe.roots) {
+      validateInterpreterSyntax(r.interpreter, r.hostId || "local");
       delete r.password;
       delete r.privateKey;
       delete r.passphrase;
@@ -610,7 +716,23 @@ export class Engine {
         "UNSUPPORTED_LANGUAGE",
         "No language service is available for this language.",
       );
-    const interpreter = p.interpreter || (await this.detectPython(rootPath));
+    const owner = [...this.roots.values()]
+      .filter(
+        (r) =>
+          inside(rootPath, r.path) &&
+          this.rootOwners.get(r.id)?.has(p.clientId || "default"),
+      )
+      .sort((a, b) => b.path.length - a.path.length)[0];
+    const configured =
+      p.interpreter === undefined
+        ? this.rootConfigs.get(owner?.id)?.get(p.clientId || "default")
+            ?.interpreter
+        : p.interpreter;
+    if (language === "python") await this.validateInterpreter(configured);
+    const interpreter =
+      language === "python"
+        ? configured || (await this.detectPython(rootPath))
+        : null;
     const key = [
       rootPath,
       language,

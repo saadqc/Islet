@@ -210,11 +210,25 @@ select:focus {
   flex-shrink: 0;
   color: var(--muted);
 }
-.python-icon {
-  color: #589df6 !important;
+.file-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  vertical-align: middle;
+  pointer-events: none;
 }
-.code-icon {
-  color: #56a8f5 !important;
+.file-icon img {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+.file-icon .file-icon-light,
+.app.light .file-icon-dark {
+  display: none;
+}
+.app.light .file-icon-light {
+  display: block;
 }
 .host-badge {
   font-size: 9px;

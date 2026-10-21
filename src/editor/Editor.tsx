@@ -1,4 +1,4 @@
-import {minimalEdits} from '../core/edits';
+import { minimalEdits } from "../core/edits";
 import { expandSnippet } from "./snippets";
 import React, {
   forwardRef,
@@ -107,6 +107,7 @@ export interface EditorHandle {
   focus: () => void;
   snapshot: () => LocationSnapshot | undefined;
   restore: (location: LocationSnapshot) => void;
+  reveal: (location: LocationSnapshot) => void;
   command: (id: string) => void;
   toggleBookmark: (offset?: number) => void;
   functionOffset: (direction: 1 | -1) => Promise<number | undefined>;
@@ -367,6 +368,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
     const restore = (location: LocationSnapshot) => {
       const v = viewRef.current;
       if (!v) return;
+      v.focus();
       v.dispatch({
         selection: EditorSelection.single(
           Math.min(location.anchor, v.state.doc.length),
@@ -376,6 +378,26 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
       requestAnimationFrame(() => {
         v.scrollDOM.scrollTop = location.scrollTop;
         v.scrollDOM.scrollLeft = location.scrollLeft;
+      });
+    };
+    const reveal = (location: LocationSnapshot) => {
+      const v = viewRef.current;
+      if (!v || docRef.current.id !== location.documentId) return;
+      const head = Math.min(location.head, v.state.doc.length);
+      v.focus();
+      v.dispatch({
+        selection: EditorSelection.single(
+          Math.min(location.anchor, v.state.doc.length),
+          head,
+        ),
+      });
+      // Run after a newly mounted editor's exact viewport restoration. Semantic
+      // navigation reveals the target; Back/Forward use restore() unchanged.
+      requestAnimationFrame(() => {
+        if (viewRef.current !== v) return;
+        v.dispatch({
+          effects: EditorView.scrollIntoView(head, { y: "center" }),
+        });
       });
     };
     const bookmarks = () => {
@@ -501,6 +523,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
       focus: () => viewRef.current?.focus(),
       snapshot,
       restore,
+      reveal,
       command: runCommand,
       toggleBookmark,
       functionOffset,
@@ -861,7 +884,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
               const text = update.state.doc.toString();
-              if(!syncingExternal.current)propsRef.current.onChange(text);
+              if (!syncingExternal.current) propsRef.current.onChange(text);
               const edits: { from: number; to: number; inserted: number }[] =
                 [];
               update.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
@@ -906,6 +929,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
           EditorView.domEventHandlers({
             contextmenu(event, view) {
               event.preventDefault();
+              // macOS also emits contextmenu for Control-left-click. That
+              // gesture belongs to semantic navigation, so it must not open a
+              // menu whose dismissal would restore the source selection.
+              if (event.ctrlKey || event.metaKey) return true;
               propsRef.current.onContextMenu?.({
                 x: event.clientX,
                 y: event.clientY,
@@ -927,6 +954,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
                 });
                 if (offset != null) {
                   event.preventDefault();
+                  view.focus();
+                  view.dispatch({ selection: EditorSelection.cursor(offset) });
                   void propsRef.current.languages
                     .definition(docRef.current, offset)
                     .then((result) => propsRef.current.onNavigate?.(result))
@@ -1069,23 +1098,50 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         bookmarks();
         if (props.document.location) restore(props.document.location);
       } else if (v.state.doc.toString() !== props.document.text) {
-        const previous=v.state.doc.toString();
-        const metadata=props.document.lastChange;
-        const exact=metadata?.version===props.document.version&&metadata.before===previous;
-        const edits=exact?metadata.edits:minimalEdits(previous,props.document.text);
-        const location=exact?metadata.location:props.document.location;
-        const scroll={top:v.scrollDOM.scrollTop,left:v.scrollDOM.scrollLeft};
-        syncingExternal.current=true;
+        const previous = v.state.doc.toString();
+        const metadata = props.document.lastChange;
+        const exact =
+          metadata?.version === props.document.version &&
+          metadata.before === previous;
+        const edits = exact
+          ? metadata.edits
+          : minimalEdits(previous, props.document.text);
+        const location = exact ? metadata.location : props.document.location;
+        const scroll = {
+          top: v.scrollDOM.scrollTop,
+          left: v.scrollDOM.scrollLeft,
+        };
+        syncingExternal.current = true;
         try {
           v.dispatch({
-            changes:edits.map(e=>({from:e.from,to:e.to,insert:e.text})),
-            ...(location?{selection:EditorSelection.single(location.anchor,location.head)}:{}),
-            annotations:Transaction.addToHistory.of(false)
+            changes: edits.map((e) => ({
+              from: e.from,
+              to: e.to,
+              insert: e.text,
+            })),
+            ...(location
+              ? {
+                  selection: EditorSelection.single(
+                    location.anchor,
+                    location.head,
+                  ),
+                }
+              : {}),
+            annotations: Transaction.addToHistory.of(false),
           });
-        } finally {syncingExternal.current=false;}
-        const top=location?.scrollTop??scroll.top,left=location?.scrollLeft??scroll.left;
-        v.scrollDOM.scrollTop=top;v.scrollDOM.scrollLeft=left;
-        requestAnimationFrame(()=>{if(viewRef.current===v){v.scrollDOM.scrollTop=top;v.scrollDOM.scrollLeft=left;}});
+        } finally {
+          syncingExternal.current = false;
+        }
+        const top = location?.scrollTop ?? scroll.top,
+          left = location?.scrollLeft ?? scroll.left;
+        v.scrollDOM.scrollTop = top;
+        v.scrollDOM.scrollLeft = left;
+        requestAnimationFrame(() => {
+          if (viewRef.current === v) {
+            v.scrollDOM.scrollTop = top;
+            v.scrollDOM.scrollLeft = left;
+          }
+        });
       }
       void refreshLanguage();
     }, [props.document.id, props.document.version]);
@@ -1122,18 +1178,45 @@ export function functionOffsets(state: EditorState): number[] {
         )
       )
         offsets.push(node.from);
-      if (node.name === "VariableDeclaration" || node.name === "PropertyDeclaration") {
-        for(let expression=node.node.firstChild;expression;expression=expression.nextSibling){
-          let value=expression;
-          while(value.name==='ParenthesizedExpression'){
-            const inner=value.firstChild?.nextSibling;
-            if(!inner)break;
-            value=inner;
+      if (
+        node.name === "VariableDeclaration" ||
+        node.name === "PropertyDeclaration"
+      ) {
+        for (
+          let expression = node.node.firstChild;
+          expression;
+          expression = expression.nextSibling
+        ) {
+          let value = expression;
+          while (value.name === "ParenthesizedExpression") {
+            const inner = value.firstChild?.nextSibling;
+            if (!inner) break;
+            value = inner;
           }
-          if(value.name!=='ArrowFunction'||expression.prevSibling?.name!=='Equals')continue;
-          let binding=expression.prevSibling.prevSibling;
-          while(binding&&!['VariableDefinition','PropertyDefinition',',','const','let','var'].includes(binding.name))binding=binding.prevSibling;
-          if(binding&&(binding.name==='VariableDefinition'||binding.name==='PropertyDefinition'))offsets.push(binding.from);
+          if (
+            value.name !== "ArrowFunction" ||
+            expression.prevSibling?.name !== "Equals"
+          )
+            continue;
+          let binding = expression.prevSibling.prevSibling;
+          while (
+            binding &&
+            ![
+              "VariableDefinition",
+              "PropertyDefinition",
+              ",",
+              "const",
+              "let",
+              "var",
+            ].includes(binding.name)
+          )
+            binding = binding.prevSibling;
+          if (
+            binding &&
+            (binding.name === "VariableDefinition" ||
+              binding.name === "PropertyDefinition")
+          )
+            offsets.push(binding.from);
         }
       }
     },

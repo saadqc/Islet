@@ -5,6 +5,47 @@ import os from "node:os";
 import net from "node:net";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+function parseRoot(input, cwd) {
+  if (typeof input !== "string" || !input || input.includes("\0"))
+    throw new Error("A folder path without NUL characters is required.");
+  if (/^ssh:\/\//i.test(input)) {
+    const url = new URL(input);
+    const username = decodeURIComponent(url.username);
+    if (
+      url.password ||
+      !url.hostname ||
+      url.hostname.includes("%") ||
+      /[\s@:/\\\0]/.test(username) ||
+      !url.pathname.startsWith("/") ||
+      url.pathname === "/"
+    )
+      throw new Error(
+        "SSH URI requires a host and absolute folder path, without a password.",
+      );
+    if (url.search || url.hash)
+      throw new Error("SSH URI cannot contain query or fragment.");
+    const remotePath = decodeURIComponent(url.pathname);
+    if (remotePath.includes("\0"))
+      throw new Error("Folder paths cannot contain NUL characters.");
+    const target =
+      (username ? username + "@" : "") + url.hostname.toLowerCase();
+    if (target.startsWith("-"))
+      throw new Error("Invalid SSH host or username.");
+    return {
+      hostId: "ssh:" + target + (url.port ? ":" + Number(url.port) : ""),
+      target,
+      port: url.port ? Number(url.port) : undefined,
+      path: path.posix.normalize(remotePath).replace(/\/+$/, "") || "/",
+    };
+  }
+  if (path.win32.isAbsolute(input) && !path.isAbsolute(input))
+    throw new Error("Windows folder paths are not supported on this host.");
+  return {
+    hostId: "local",
+    path: path.resolve(cwd, input.replace(/^~(?=\/|$)/, os.homedir())),
+  };
+}
+const rootKey = (root) => JSON.stringify([root.hostId, root.path]);
 export function parseArgs(args, cwd = process.cwd()) {
   let operation = "open",
     windowId,
@@ -13,6 +54,7 @@ export function parseArgs(args, cwd = process.cwd()) {
     json = false,
     stop = false;
   const roots = [],
+    bindings = new Map(),
     errors = [];
   if (["open", "add", "windows"].includes(args[0])) operation = args.shift();
   for (let i = 0; i < args.length; i++) {
@@ -23,13 +65,45 @@ export function parseArgs(args, cwd = process.cwd()) {
     }
     if (!stop && arg === "--window") {
       windowId = args[++i];
-      if (!windowId) throw new Error("--window requires a window ID.");
+      if (!windowId || windowId.startsWith("--"))
+        throw new Error("--window requires a window ID.");
       continue;
     }
     if (!stop && arg === "--workspace") {
       workspace = args[++i];
-      if (!workspace) throw new Error("--workspace requires a path.");
+      if (!workspace || workspace.startsWith("--"))
+        throw new Error("--workspace requires a path.");
       workspace = path.resolve(cwd, workspace);
+      continue;
+    }
+    if (!stop && arg === "--python-interpreter") {
+      const selector = args[++i],
+        interpreter = args[++i];
+      if (
+        !selector ||
+        selector.startsWith("--") ||
+        !interpreter ||
+        interpreter.startsWith("--")
+      )
+        throw new Error(
+          "--python-interpreter requires a folder or SSH URI and an absolute executable path.",
+        );
+      const root = parseRoot(selector, cwd);
+      const absolute =
+        root.hostId === "local"
+          ? path.isAbsolute(interpreter)
+          : path.posix.isAbsolute(interpreter);
+      if (!absolute || interpreter.includes("\0"))
+        throw new Error(
+          "--python-interpreter requires a nonempty absolute executable path on the selected host.",
+        );
+      const key = rootKey(root),
+        previous = bindings.get(key);
+      if (previous && previous.interpreter !== interpreter)
+        throw new Error(
+          "Conflicting Python interpreters were supplied for the same root.",
+        );
+      bindings.set(key, { ...root, interpreter });
       continue;
     }
     if (!stop && arg === "--new-window") {
@@ -42,44 +116,19 @@ export function parseArgs(args, cwd = process.cwd()) {
     }
     if (!stop && arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
     try {
-      if (arg.startsWith("ssh://")) {
-        const url = new URL(arg);
-        if (
-          url.password ||
-          !url.hostname ||
-          !url.pathname.startsWith("/") ||
-          url.pathname === "/"
-        )
-          throw new Error(
-            "SSH URI requires a host and absolute folder path, without a password.",
-          );
-        if (url.search || url.hash)
-          throw new Error("SSH URI cannot contain query or fragment.");
-        const target =
-          (url.username ? decodeURIComponent(url.username) + "@" : "") +
-          url.hostname;
-        const hostId = "ssh:" + target + (url.port ? ":" + url.port : "");
-        roots.push({
-          hostId,
-          target,
-          port: url.port ? Number(url.port) : undefined,
-          path: decodeURIComponent(url.pathname),
-        });
-      } else {
-        roots.push({
-          hostId: "local",
-          path: path.resolve(cwd, arg.replace(/^~(?=\/|$)/, os.homedir())),
-        });
-      }
+      roots.push(parseRoot(arg, cwd));
     } catch (e) {
       errors.push({ input: arg, error: e.message });
     }
   }
-  const unique = roots.filter(
-    (r, i) =>
-      roots.findIndex((x) => x.hostId === r.hostId && x.path === r.path) === i,
-  );
-  if (operation === "windows" && (unique.length || workspace))
+  const unique = [...new Map(roots.map((r) => [rootKey(r), r])).values()];
+  if (!workspace)
+    for (const [key, binding] of bindings) {
+      const root = unique.find((r) => rootKey(r) === key);
+      if (root) root.interpreter = binding.interpreter;
+      else unique.push(binding);
+    }
+  if (operation === "windows" && (unique.length || workspace || bindings.size))
     throw new Error("windows does not accept roots.");
   if (operation === "add" && workspace)
     throw new Error("Use open --workspace to restore a workspace.");
@@ -90,6 +139,13 @@ export function parseArgs(args, cwd = process.cwd()) {
     newWindow: operation === "open" ? newWindow || !windowId : false,
     json,
     roots: unique,
+    ...(workspace
+      ? {
+          interpreterOverrides: [...bindings.values()].map(
+            ({ hostId, path, interpreter }) => ({ hostId, path, interpreter }),
+          ),
+        }
+      : {}),
     errors,
     requestId: crypto.randomUUID(),
   };

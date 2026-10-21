@@ -77,9 +77,11 @@ jobs:
             ~/.cargo/git
             src-tauri/target
           key: macos-arm64-rust-1.99.1-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: macos-arm64-rust-1.99.1-
       - run: npm ci
       - run: mkdir -p design/validation
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: npm test
       - run: node --test tests/release-helpers.test.mjs
       - run: npm run test:backend

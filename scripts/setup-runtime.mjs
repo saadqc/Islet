@@ -242,12 +242,9 @@ export async function setupRemote(arch) {
   const stage = path.join(root, ".tools", `remote-${arch}`);
   await fs.rm(stage, { recursive: true, force: true });
   const versions = await extractRuntime("linux", arch, stage);
-  for (const name of [
-    "host.mjs",
-    "engine.mjs",
-    "askpass.mjs",
-    "regex-worker.mjs",
-  ])
+  for (const name of (
+    await fs.readdir(path.join(root, "remote-helper"))
+  ).filter((name) => name.endsWith(".mjs")))
     await fs.copyFile(
       path.join(root, "remote-helper", name),
       path.join(stage, name),
@@ -265,6 +262,17 @@ export async function setupRemote(arch) {
     target + ".sha256",
     sha256(await fs.readFile(target)) + "\n",
   );
+  // A local build may retain earlier helper versions; only ship this version.
+  for (const name of await fs.readdir(directory)) {
+    if (
+      new RegExp(
+        `^islet-[0-9][^/]*-linux-${arch}\\.tar\\.gz(?:\\.sha256)?$`,
+      ).test(name) &&
+      name !== path.basename(target) &&
+      name !== path.basename(target) + ".sha256"
+    )
+      await fs.rm(path.join(directory, name));
+  }
   console.log(
     `Bundled verified ${NODE_VERSION} Linux ${arch} runtime: ${target}`,
   );

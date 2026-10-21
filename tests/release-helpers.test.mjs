@@ -20,6 +20,40 @@ import {
   detachImage,
 } from "../scripts/package-release.mjs";
 import { signPreview } from "../scripts/sign-preview.mjs";
+import { inspectIcon } from "../scripts/app-icon.mjs";
+
+test("macOS bundle declares the complete Islet Dock icon", async () => {
+  const config = JSON.parse(
+    await fs.readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url)),
+  );
+  assert.ok(config.bundle.icon.includes("icons/icon.icns"));
+  const bytes = await fs.readFile(
+    new URL("../src-tauri/icons/icon.icns", import.meta.url),
+  );
+  assert.ok(inspectIcon(bytes).includes("ic10"));
+  assert.throws(() => inspectIcon(bytes.subarray(0, 16)), /ICNS length/);
+});
+test("desktop and remote helper release versions stay aligned", async () => {
+  const read = (name) =>
+    fs.readFile(new URL("../" + name, import.meta.url), "utf8");
+  const version = JSON.parse(await read("package.json")).version;
+  assert.equal(
+    JSON.parse(await read("src-tauri/tauri.conf.json")).version,
+    version,
+  );
+  assert.equal(
+    (await read("remote-helper/engine.mjs")).match(
+      /export const VERSION = "([^"]+)"/,
+    )?.[1],
+    version,
+  );
+  assert.equal(
+    (await read("src-tauri/Cargo.toml")).match(
+      /\[package\][\s\S]*?version = "([^"]+)"/,
+    )?.[1],
+    version,
+  );
+});
 function macho(arch, minimum = 0x000d0500) {
   const bytes = Buffer.alloc(64);
   bytes.writeUInt32LE(0xfeedfacf, 0);
