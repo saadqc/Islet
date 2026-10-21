@@ -156,15 +156,10 @@ try {
     .poll(async () => {
       const line = await declaration.boundingBox(),
         scroll = await page.locator(".cm-scroller").boundingBox();
-      return line && scroll ? line.y - scroll.y : 0;
+      const offset = line && scroll ? line.y - scroll.y : null;
+      return offset !== null && offset > 60 && offset < 125;
     })
-    .toBeGreaterThan(60);
-  const line = await declaration.boundingBox(),
-    scroll = await page.locator(".cm-scroller").boundingBox();
-  assert.ok(
-    line.y - scroll.y < 125,
-    `Definition should start after about five lines, got ${line.y - scroll.y}`,
-  );
+    .toBe(true);
   await page
     .getByRole("button", { name: "Toggle caller panel", exact: true })
     .click();
