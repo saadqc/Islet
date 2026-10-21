@@ -147,6 +147,51 @@ try {
   );
   assert.equal(ownedRecoveryRecords.length, 3);
   assert.equal(new Set(ownedRecoveryRecords.map((r) => r.key)).size, 3);
+  const registry = (await fs.readdir(data)).find((name) =>
+    /^ipc-\d+\.json$/.test(name),
+  );
+  assert.ok(registry, "Packaged file helper must register its IPC endpoint");
+  const helperPid = Number(registry.match(/^ipc-(\d+)\.json$/)[1]);
+  const parent = await exec("/bin/ps", [
+    "-p",
+    String(helperPid),
+    "-o",
+    "ppid=",
+  ]);
+  assert.equal(Number(parent.stdout.trim()), child.pid);
+  console.log(
+    "Suspending isolated packaged app and helper beyond the 120s lease",
+  );
+  try {
+    process.kill(child.pid, "SIGSTOP");
+    process.kill(helperPid, "SIGSTOP");
+    await new Promise((resolve) => setTimeout(resolve, 125000));
+  } finally {
+    // Resume the helper first: no queued heartbeat may rescue an expired lease.
+    try {
+      process.kill(helperPid, "SIGCONT");
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      process.kill(child.pid, "SIGCONT");
+    }
+  }
+  const resumedFolder = path.join(fixture, "opened after resume");
+  await fs.mkdir(resumedFolder, { recursive: true });
+  await run(["add", "--window", "main", resumedFolder]);
+  await wait(async () => {
+    const snapshot = await readSession("main");
+    return snapshot?.roots?.some(
+      (root) => root.path === resumedFolder && root.state === "ready",
+    );
+  });
+  assert.equal(
+    Number(
+      (
+        await exec("/bin/ps", ["-p", String(helperPid), "-o", "ppid="])
+      ).stdout.trim(),
+    ),
+    child.pid,
+  );
   await engine.close();
   const languageScript = `import {Engine} from ${JSON.stringify(pathToFileURL(path.join(resources, "_up_/remote-helper/engine.mjs")).href)};import {pathToFileURL} from 'node:url';const engine=new Engine({runtimeDir:${JSON.stringify(path.join(resources, "resources/runtime/node_modules"))},dataDir:${JSON.stringify(path.join(data, "language-smoke"))}});const result=[];try{await engine.openRoot({path:${JSON.stringify(fixture)}});for(const language of ['python','javascript']){const service=await engine.startService({rootPath:${JSON.stringify(fixture)},language});const initialized=await engine.requestService({sessionId:service.sessionId,method:'initialize',params:{processId:process.pid,rootUri:pathToFileURL(${JSON.stringify(fixture)}).href,capabilities:{}}});if(!initialized.capabilities.renameProvider||!initialized.capabilities.semanticTokensProvider)throw new Error(language+' capabilities missing');result.push({language,rename:true,semanticTokens:true});await engine.stopService(service.sessionId);}console.log(JSON.stringify(result));}finally{await engine.close();}`;
   const languageResult = await exec(
@@ -173,6 +218,7 @@ try {
       "One focused target and missing-target rejection",
       "Explicit second-window targeting and independent sessions",
       "Unreachable SSH root remains disconnected while local roots persist",
+      "App and helper survive a 125-second suspension; CLI and folder opening work after resume",
     ],
     limitations: [
       "Handshake time includes CLI process polling and is not a precise cold-editor paint benchmark.",

@@ -16,6 +16,7 @@ mod desktop;
 mod updater;
 
 type Reply = Result<Value, String>;
+const HOST_DISCONNECTED: &str = "{\"code\":\"HOST_DISCONNECTED\",\"message\":\"Islet's file service stopped. Copy any unsaved changes, then reopen Islet to reconnect.\"}";
 struct HostState {
     input: Mutex<ChildStdin>,
     child: Mutex<Child>,
@@ -103,7 +104,7 @@ impl HostState {
                 }
             }
             for (_, waiter) in reader_pending.lock().unwrap().drain() {
-                let _=waiter.send(Err("{\"code\":\"HOST_DISCONNECTED\",\"message\":\"Islet's file host stopped. Recovery buffers remain on disk.\"}".into()));
+                let _ = waiter.send(Err(HOST_DISCONNECTED.into()));
             }
         });
         Ok(Self {
@@ -123,13 +124,13 @@ impl HostState {
             let mut input = self.input.lock().unwrap();
             input.write_all(line.as_bytes()).and_then(|_| input.flush())
         };
-        if let Err(e) = written {
+        if written.is_err() {
             self.pending.lock().unwrap().remove(&id);
-            return Err(e.to_string());
+            return Err(HOST_DISCONNECTED.into());
         }
         match tokio::time::timeout(Duration::from_secs(190), rx).await {
             Ok(Ok(value)) => value,
-            Ok(Err(e)) => Err(e.to_string()),
+            Ok(Err(_)) => Err(HOST_DISCONNECTED.into()),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 Err(

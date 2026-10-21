@@ -1030,16 +1030,19 @@ if (
     input: process.stdin,
     crlfDelay: Infinity,
   });
-  let lease = setTimeout(() => {
-    host.close().finally(() => process.exit(0));
-  }, 120000);
+  // A local helper belongs to the app's stdin pipe. Heartbeats can pause during
+  // system sleep or App Nap, so a wall-clock lease would kill a healthy helper
+  // on wake. Only remote helpers need a lease to clean up abandoned SSH sessions.
+  let lease;
   const touch = () => {
+    if (!remoteMode) return;
     clearTimeout(lease);
     lease = setTimeout(() => {
       host.close().finally(() => process.exit(0));
     }, 120000);
+    lease.unref();
   };
-  lease.unref();
+  touch();
   reader.on("line", (line) => {
     touch();
     if (Buffer.byteLength(line) > 64 * 1024 * 1024) {
