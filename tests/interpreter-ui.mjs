@@ -1,4 +1,4 @@
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -155,7 +155,7 @@ try {
     "first Python service",
   );
   await settings();
-  assert.equal(await selected().inputValue(), interpreters[0]);
+  await expect(selected()).toHaveValue(interpreters[0]);
   await close();
   await open("second.py");
   const secondSession = await wait(
@@ -165,11 +165,11 @@ try {
     "second Python service",
   );
   await settings();
-  assert.equal(await selected().inputValue(), interpreters[1]);
+  await expect(selected()).toHaveValue(interpreters[1]);
   await close();
   await open("first.py");
   await settings();
-  assert.equal(await selected().inputValue(), interpreters[0]);
+  await expect(selected()).toHaveValue(interpreters[0]);
   await selected().fill(interpreters[1]);
   await page
     .getByRole("button", {
@@ -216,7 +216,7 @@ try {
     "persisted updated root",
   );
   await settings();
-  assert.equal(await selected().inputValue(), interpreters[1]);
+  await expect(selected()).toHaveValue(interpreters[1]);
   await selected().fill("");
   await page
     .getByRole("button", {
@@ -242,7 +242,7 @@ try {
   );
   await open("second.py");
   await settings();
-  assert.equal(await selected().inputValue(), interpreters[1]);
+  await expect(selected()).toHaveValue(interpreters[1]);
   await close();
   assert.deepEqual(errors, []);
   console.log(
