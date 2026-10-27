@@ -25,10 +25,20 @@ export default defineConfig({
           throw new Error(
             "Review the Jspreadsheet cell-focus adapter after upgrading CE.",
           );
+        const scrollClose =
+          't.edition&&"jdropdown"!=e.target.className.substr(0,9)&&closeEditor.call(t,t.edition[0],!0)';
+        if (!code.includes(scrollClose))
+          throw new Error(
+            "Review the Jspreadsheet text-editor scroll adapter after upgrading CE.",
+          );
         return {
           code: code
             .replace(handler, "")
-            .replace(editorFocus, "i.focus({preventScroll:true}),i.value=s"),
+            .replace(editorFocus, "i.focus({preventScroll:true}),i.value=s")
+            .replace(
+              scrollClose,
+              't.edition&&!t.edition[0].querySelector("input,textarea")&&"jdropdown"!=e.target.className.substr(0,9)&&closeEditor.call(t,t.edition[0],!0)',
+            ),
           map: null,
         };
       },
