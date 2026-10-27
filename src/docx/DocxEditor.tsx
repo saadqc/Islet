@@ -11,6 +11,7 @@ import "./docx.css";
 import type { DocumentModel } from "../core/types";
 import type { DocumentStore } from "../core/documents";
 import { decodeOffice, encodeOffice } from "./formats";
+import DocumentSearch from "./DocumentSearch";
 export interface DocxHandle {
   command: (command: string) => Promise<void>;
 }
@@ -35,6 +36,16 @@ export default forwardRef<
   const [zoom, setZoom] = useState(
     doc.docxZoom || { value: 100, mode: "manual" as const },
   );
+  const [search, setSearch] = useState<{
+    replace: boolean;
+    sequence: number;
+  } | null>(null);
+  function openSearch(replace = false) {
+    setSearch((previous) => ({
+      replace: replace && !doc.readonly,
+      sequence: (previous?.sequence || 0) + 1,
+    }));
+  }
   function changeZoom(value: number) {
     if (ready) instance.current?.setZoom(Math.max(25, Math.min(400, value)));
   }
@@ -72,6 +83,10 @@ export default forwardRef<
   }, [doc.text]);
   useImperativeHandle(ref, () => ({
     async command(command) {
+      if (command === "find" || command === "replace") {
+        if (ready) openSearch(command === "replace");
+        return;
+      }
       const editor = instance.current?.activeEditor;
       if (command === "undo" || command === "redo") {
         if (editor?.commands?.[command])
@@ -219,6 +234,14 @@ export default forwardRef<
         id={ids.current + "-toolbar"}
         ref={toolbar}
       />
+      {ready && search && instance.current?.activeEditor && (
+        <DocumentSearch
+          editor={instance.current.activeEditor}
+          request={search}
+          readonly={!!doc.readonly}
+          onClose={() => setSearch(null)}
+        />
+      )}
       {error && (
         <p role="alert">Could not open or export this document: {error}</p>
       )}
@@ -229,6 +252,25 @@ export default forwardRef<
         role="group"
         aria-label="Document zoom controls"
       >
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={() => openSearch()}
+          title="Find (Cmd/Ctrl F)"
+        >
+          Find
+        </button>
+        {!doc.readonly && (
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={() => openSearch(true)}
+            title="Find and replace (Cmd/Ctrl R)"
+          >
+            Replace
+          </button>
+        )}
+        <span className="docx-viewbar-spacer" />
         <button
           type="button"
           aria-label="Zoom out"

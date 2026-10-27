@@ -1396,6 +1396,18 @@ export default function App() {
   useEffect(() => {
     const custom = (event: KeyboardEvent) => {
       if (modal || event.defaultPrevented) return;
+      if (
+        doc?.docx &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        ["f", "r"].includes(event.key.toLowerCase())
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        command(event.key.toLowerCase() === "r" ? "replace" : "find");
+        return;
+      }
       // CE keeps its active grid globally, even when focus moves to body.
       // Handle Save before its document-level CSV download shortcut.
       if (

@@ -11,7 +11,7 @@ const fixture = await fs.realpath(
 const evidence = path.join(
   os.homedir(),
   "islet-ui-screens",
-  "offline-docx-files-20261027",
+  "offline-docx-files-20261028",
 );
 await fs.mkdir(evidence, { recursive: true });
 await fs.mkdir(path.join(fixture, "nested"));
@@ -64,7 +64,10 @@ try {
   const page = await browser.newPage({
     viewport: { width: 1440, height: 900 },
   });
-  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("pageerror", (e) => {
+    errors.push(e.message);
+    console.error("PAGE", e.message);
+  });
   page.on("console", (msg) => {
     if (msg.type() === "error") console.error("BROWSER", msg.text());
   });
@@ -215,7 +218,10 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.locator(".changes-bar")).toHaveCount(0);
   await body.click({ position: { x: 110, y: 105 } });
-  await page.keyboard.type("Offline DOCX editing works.", { delay: 50 });
+  await page.keyboard.type(
+    "Offline DOCX editing works. FindMe findme FindMe.",
+    { delay: 50 },
+  );
   await page.waitForTimeout(2000);
   await expect(page.locator(".tab.active")).toContainText("document.docx");
   await page.screenshot({ path: path.join(evidence, "after-type.png") });
@@ -253,6 +259,96 @@ try {
   await expect(page.locator(".docx-editor")).toContainText(
     "Offline DOCX editing works.",
   );
+  // Search uses native document ranges, is view-only until replacement, and
+  // does not trigger browser Find/Reload on either platform's shortcuts.
+  await page.keyboard.press("Control+f");
+  const find = page.getByRole("textbox", {
+    name: "Find in document",
+    exact: true,
+  });
+  const results = page.getByLabel("Document search results");
+  await expect(find).toBeFocused();
+  await find.fill("FindMe");
+  await expect(results).toHaveText("1 of 3");
+  await page.keyboard.press("Enter");
+  await expect(results).toHaveText("2 of 3");
+  await expect(find).toBeFocused();
+  await page.keyboard.press("Shift+Enter");
+  await expect(results).toHaveText("1 of 3");
+  await page.getByRole("checkbox", { name: "Match case" }).check();
+  await expect(results).toHaveText("1 of 2");
+  await expect(page.locator(".changes-bar")).toHaveCount(0);
+  await page.keyboard.press("Meta+r");
+  const replace = page.getByRole("textbox", {
+    name: "Replace with",
+    exact: true,
+  });
+  await expect(replace).toBeVisible();
+  await replace.fill("Found");
+  await page
+    .locator(".docx-search")
+    .getByRole("button", { name: "Replace", exact: true })
+    .click();
+  await expect(results).toHaveText("1 of 1");
+  await page
+    .locator(".docx-search")
+    .getByRole("button", { name: "Replace all", exact: true })
+    .click();
+  await expect(results).toHaveText("No results");
+  await expect(page.locator(".docx-canvas")).toContainText(
+    "Found findme Found.",
+  );
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(results).toHaveText("1 of 1");
+  await expect(page.locator(".docx-canvas")).toContainText(
+    "Found findme FindMe.",
+  );
+  await page.getByRole("button", { name: "Redo", exact: true }).click();
+  await expect(results).toHaveText("No results");
+  await find.fill("Found");
+  await expect(results).toHaveText("1 of 2");
+  for (const width of [1440, 1280, 1024, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    // Let the vendor toolbar finish its debounced responsive measurement.
+    await page.waitForTimeout(350);
+    await page.screenshot({
+      path: path.join(evidence, `docx-search-${width}.png`),
+    });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".docx-search")).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+s");
+  await expect(page.locator(".changes-bar")).toHaveCount(0);
+  await open("notes.txt");
+  await open("document.docx");
+  await expect(page.locator('.docx-editor[data-ready="true"]')).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(page.locator(".docx-canvas")).toContainText(
+    "Found findme Found.",
+  );
+  await page.keyboard.press("Control+r");
+  await expect(replace).toBeVisible();
+  await page.keyboard.press("Meta+f");
+  await expect(find).toBeFocused();
+  await expect(replace).toHaveCount(0);
+  await find.fill("not present in this document");
+  await expect(results).toHaveText("No results");
+  await page.keyboard.press("Escape");
+  let recoveryBefore;
+  await expect
+    .poll(() => {
+      const clean = [...saved.values()]
+        .flatMap((value) => value?.documents || [])
+        .find(
+          (doc) =>
+            doc.path === path.join(fixture, "document.docx") && !doc.dirty,
+        );
+      if (clean) recoveryBefore = clean.text;
+      return !!clean;
+    })
+    .toBe(true);
   await page
     .locator(".docx-editor .superdoc-page")
     .first()
@@ -263,7 +359,11 @@ try {
     .poll(() =>
       [...saved.values()].some((value) =>
         value?.documents?.some(
-          (doc) => doc.docx && doc.dirty && doc.text !== doc.savedText,
+          (doc) =>
+            doc.path === path.join(fixture, "document.docx") &&
+            doc.dirty &&
+            doc.text !== doc.savedText &&
+            doc.text !== recoveryBefore,
         ),
       ),
     )
