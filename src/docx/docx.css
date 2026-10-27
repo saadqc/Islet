@@ -1,0 +1,87 @@
+.docx-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #e5e7eb;
+  color: #20242a;
+}
+.docx-toolbar {
+  flex: none;
+  background: white;
+  color: #20242a;
+  border-bottom: 1px solid #ccd0d5;
+}
+.docx-canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+.docx-editor > p {
+  padding: 12px;
+}
+.docx-editor [contenteditable] {
+  outline: none;
+}
+.docx-toolbar .superdoc-toolbar,
+.docx-toolbar .button-group {
+  flex-wrap: wrap;
+}
+.docx-toolbar .superdoc-toolbar {
+  justify-content: flex-start;
+  row-gap: 4px;
+}
+/* The page owns Word's margins. This is the workspace around the page. */
+.docx-canvas .superdoc {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  justify-content: center;
+  padding: 28px 32px 40px;
+}
+.docx-canvas .superdoc__layers {
+  flex: 0 0 auto;
+}
+
+.docx-viewbar {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 6px 12px;
+  border-top: 1px solid #ccd0d5;
+  background: #fff;
+  color: #20242a;
+}
+.docx-viewbar button {
+  background: transparent;
+  color: inherit;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 7px;
+  min-width: 28px;
+  font-size: 12px;
+}
+.docx-viewbar button:hover:not(:disabled),
+.docx-viewbar button[aria-pressed="true"] {
+  background: #edf2fa;
+  border-color: #c5d4ec;
+}
+.docx-viewbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.docx-viewbar input[type="range"] {
+  width: 112px;
+  min-width: 64px;
+  height: 20px;
+  padding: 0;
+  accent-color: #3970b8;
+}
+.docx-viewbar .docx-zoom-value {
+  min-width: 50px;
+  font-variant-numeric: tabular-nums;
+}

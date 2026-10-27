@@ -22,6 +22,16 @@ export function fileIcon(path: string, folder = false, theme: Theme = "dark") {
       .split("/")
       .pop()
       ?.toLowerCase() || "";
+  if (!folder) {
+    const ext = name.split(".").pop();
+    const office =
+      ext &&
+      lookup(
+        { xls: "excel", xlsx: "excel", doc: "word", docx: "word", csv: "csv" },
+        ext,
+      );
+    if (office) return `/icons/office/${office}-${theme}.svg`;
+  }
   let key: string | undefined;
   const named = (id: string) => (theme === "light" ? `${id}_light` : id);
   if (folder) {

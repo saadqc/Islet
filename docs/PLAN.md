@@ -240,3 +240,34 @@ Ship the documented CLI for opening workspace files and adding ordered local/SSH
 6. Prove host-aware URI routing, remote environment resolution and interrupted-save recovery on a mixed local/Linux-SSH workspace before the complete preview release.
 
 The implementation now follows these milestones. See [validation record](VALIDATION.md) for passed checks and remaining platform, physical-input and distribution qualification.
+
+## Offline spreadsheets and file creation (27 October 2026)
+
+Owner authorized CSV/XLS/XLSX editing with Jspreadsheet CE and SheetJS CE, file/folder creation, and configurable folder double-click behavior. Legacy DOC remains deferred; the later authorized DOCX scope is recorded below.
+
+- Lazy-load locally bundled spreadsheet code and CSS. CSV opens in a grid with an editable source toggle. XLS/XLSX open in a workbook data editor with sheet selection, cell editing, undo/redo, and append-row/column controls. Arbitrary row/column shifts, sorting, and formula calculation are excluded from this initial editor; references must not silently move. Preserve formula text without executing it. Clear stale formula caches on edited exports. Advanced Excel layout, charts, pivots, macros and formatting are not guaranteed to round trip through CE.
+- Keep UTF-8 CSV values as text, preserving identifiers, detected delimiter, BOM/newline style, multiline quoted fields and ragged rows. Malformed CSV remains available through source editing. Untouched or fully undone grid data retains the exact original buffer.
+- Extend existing file snapshots with base64 binary workbook bytes, retaining host identity, revision checks, atomic replacement, filesystem permissions, uncertain-save reconciliation and unsaved recovery. Limit binary workbooks to 10 MB and editable sheets to 5,000 rows, 256 columns and 100,000 cells. Validate all sheets before exposing the editable grid.
+- Before replacing a workbook, save and verify its exact original bytes under the owning host's private Islet app-data `workbook-backups/<sha256 of canonical path>/<revision>.<extension>`. Existing corrupted backups block replacement. No backup metadata or editor state is written into the user's project.
+- SheetJS CE cannot write BIFF/XLS formulas. Preserve formula edits internally as XLSX and block ordinary XLS save when formulas are present. Offer **Save XLSX Copy…** for workbooks, creating an exclusive new file and leaving the source intact. The source tab retains its unsaved edits after saving a copy.
+- Expose New File and New Folder in the Project toolbar, native File menu and project-tree context menu; Cmd/Ctrl+N creates a file. Default to the selected folder or current document's directory. Validate names and root scope, create exclusively, refresh the tree and open new files. New XLS/XLSX files contain a valid blank workbook.
+- Settings **Expand folders with** defaults to Double click. Single click selects a folder in that mode; the disclosure arrow and keyboard expansion work immediately. Single click remains selectable in Settings and persists with other preferences.
+
+- Follow-up authorization adds worksheet create, rename, duplicate and delete for XLS/XLSX, with Excel name validation, a last-visible-sheet guard, explicit deletion confirmation and ten-action in-tab structural undo/redo. Rewrite direct formula, defined-name and internal-link sheet tokens on rename/deletion while preserving formula string literals and external workbook references. CSV remains single-sheet. All sheet operations remain in the unsaved document buffer until explicit save.
+
+
+## Offline DOCX, opening and file operations — 2026-10-27
+
+Owner authorized DOCX with SuperDoc, drag/drop copying into project folders and open/add behavior on the editor, native file associations, remote file downloads and helper-side folder ZIP downloads, plus local Finder-compatible file/folder copy/paste. Fix Open File opening only the parent folder.
+
+Implementation: lazy SuperDoc 1.47.2 AGPL editor, local templates/assets with telemetry off, binary document/recovery/conflict handling and backups; legacy DOC explicitly rejected. SuperDoc 2's proprietary engine was excluded. The live root list is consulted after attaching a selected file's parent. CLI positional files and macOS `RunEvent::Opened` route through the same file opener. Bundle associations use `Editor`/`Alternate` and do not claim defaults.
+
+File operations: scoped manifest/export/import RPCs, bounded chunks, SHA-256 checks, exclusive destination reservation, staged copies, cancellation/progress, temporary remote ZIP cleanup and ten-minute expiring helper sessions. Local file URLs are read/written through system AppKit; test builds can use a private named pasteboard. Existing helpers require protocol version 1 and prompt setup if older. Both Linux architectures and the desktop runtime bundle yazl.
+
+Qualification covers isolated fixtures only. Do not replace the installed app, publish a release, change system defaults, or use a production remote host as part of these tests.
+
+Follow-up: original Excel/Word/CSV SVGs now distinguish formats in tree and tabs. DOCX uses a centered white page on a gray padded workspace, preserving document margins; the toolbar wraps at narrow widths.
+
+Standalone file correction: Open File, positional file arguments, editor file drops and macOS file events now open only the selected file, with an exact local-file grant and no parent root. Selected folders still become projects. Grants retain client ownership and are re-established for recovered standalone tabs; ordinary dependency documents stay read-only.
+
+DOCX zoom: always-visible bottom view controls (minus/plus, 25–400% slider, current percentage/reset, Fit width), Cmd/Ctrl +/−/0 shortcuts, and per-document zoom/mode in recovery. SuperDoc performs the scale/layout changes; zoom is view state and never an edit to Word content.

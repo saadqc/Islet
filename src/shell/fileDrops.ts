@@ -18,10 +18,6 @@ export async function openDroppedPaths(
     if (entry.isDirectory) {
       if (!actions.contains(entry.path)) await actions.addRoot(entry.path);
     } else {
-      if (!actions.contains(entry.path))
-        await actions.addRoot(
-          entry.path.slice(0, entry.path.lastIndexOf("/")) || "/",
-        );
       await actions.open(entry.path);
     }
   }

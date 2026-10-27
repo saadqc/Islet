@@ -46,6 +46,9 @@ export function useNativeMenu(
           {
             text: "File",
             items: [
+              commandItem("newFile"),
+              item("newFolder", "New Folder…"),
+              { item: "Separator" },
               item("openFile", "Open File…", "CmdOrCtrl+O"),
               item("openFolder", "Open Folder…"),
               item("addSSH", "Add SSH Folder…"),

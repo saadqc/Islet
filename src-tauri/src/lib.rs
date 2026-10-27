@@ -13,6 +13,7 @@ use std::{
 use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 mod desktop;
+mod file_clipboard;
 mod updater;
 
 type Reply = Result<Value, String>;
@@ -322,6 +323,34 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Could not initialize Islet")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                let paths: Vec<String> = urls
+                    .iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .map(|file| file.to_string_lossy().to_string())
+                    .collect();
+                if !paths.is_empty() {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(state) = app.try_state::<HostState>() {
+                            if let Ok(result) = state
+                                .request("app.openPaths".into(), json!({"paths":paths}))
+                                .await
+                            {
+                                if let Some(window) = result
+                                    .get("windowId")
+                                    .and_then(Value::as_str)
+                                    .and_then(|id| app.get_webview_window(id))
+                                {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    });
+                }
+            }
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<HostState>() {
                     let _ = state

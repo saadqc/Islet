@@ -14,6 +14,7 @@ export interface Preferences {
   wrap: boolean;
   markdownDefault: "preview" | "source";
   callerPanel: boolean;
+  folderOpenMode: "single" | "double";
   uiScale: number;
   interpreter: string;
   terminal: TerminalPreference;
@@ -30,6 +31,7 @@ export const defaults: Preferences = {
   wrap: false,
   markdownDefault: "preview",
   callerPanel: false,
+  folderOpenMode: "double",
   uiScale: 1,
   interpreter: "",
   terminal: { id: "system", path: "" },
@@ -39,6 +41,7 @@ export function validatePreferences(value: Partial<Preferences>): Preferences {
     ...defaults,
     ...value,
     callerPanel: value.callerPanel === true,
+    folderOpenMode: value.folderOpenMode === "single" ? "single" : "double",
     fontSize: Math.max(9, Math.min(32, Number(value.fontSize) || 13)),
     lineHeight: Math.max(1.1, Math.min(2.5, Number(value.lineHeight) || 1.55)),
     uiScale: Math.max(0.75, Math.min(1.5, Number(value.uiScale) || 1)),

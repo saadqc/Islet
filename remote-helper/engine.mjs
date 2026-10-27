@@ -1,3 +1,4 @@
+import { Transfers } from "./transfers.mjs";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
@@ -7,8 +8,23 @@ import { Worker } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "0.1.5";
+export const VERSION = "0.1.6";
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+const binaryWorkbook = (file) => /\.(?:xls|xlsx|docx)$/i.test(file);
+function workbookBytes(text) {
+  if (
+    typeof text !== "string" ||
+    text.length > 14 * 1024 * 1024 ||
+    !text.length ||
+    text.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(text)
+  )
+    fail("INVALID_WORKBOOK", "Invalid workbook bytes (10 MB maximum).");
+  const bytes = Buffer.from(text, "base64");
+  if (bytes.length > 10 * 1024 * 1024)
+    fail("FILE_TOO_LARGE", "Workbooks are limited to 10 MB.");
+  return bytes;
+}
 const inside = (file, root) =>
   file === root || file.startsWith(root + path.sep);
 const fail = (code, message, details) => {
@@ -76,9 +92,11 @@ export class Engine {
         : path.resolve(import.meta.dirname, "../node_modules"));
     this.hostId = hostId;
     this.roots = new Map();
+    this.openedFiles = new Map();
     this.rootOwners = new Map();
     this.rootConfigs = new Map();
     this.sessionIndexQueue = Promise.resolve();
+    this.transfers = new Transfers(this);
     this.documents = new Map();
     this.services = new Map();
     this.searches = new Map();
@@ -113,6 +131,7 @@ export class Engine {
       .sort((a, b) => b.path.length - a.path.length)[0];
     if (
       !root &&
+      !this.openedFiles.has(canonical) &&
       !(dependency && !write) &&
       !(write && this.documents.get(canonical)?.writable)
     )
@@ -124,22 +143,40 @@ export class Engine {
     return canonical;
   }
   async request(operation, p = {}) {
+    if (operation.startsWith("transfer."))
+      return this.transfers.request(operation.slice(9), p);
     operation = operation.replace(/^file\./, "fs.");
     switch (operation) {
       case "app.info":
         return {
           version: VERSION,
+          fileProtocol: 1,
           platform: process.platform,
           arch: process.arch,
           node: process.version,
           generation: this.generation,
           dataDir: this.dataDir,
         };
+      case "fs.authorize":
+        return this.authorizeFile(p);
       case "root.open":
         return this.openRoot(p);
       case "root.remove":
         return this.removeRoot(p);
       case "root.closeClient":
+        for (const [file, owners] of this.openedFiles) {
+          owners.delete(p.clientId || "default");
+          if (!owners.size) {
+            this.openedFiles.delete(file);
+            if (
+              ![...this.roots.values()].some((root) => inside(file, root.path))
+            ) {
+              this.documents.delete(file);
+              this.watchers.get(file)?.close();
+              this.watchers.delete(file);
+            }
+          }
+        }
         for (const root of [...this.roots.values()])
           await this.removeRoot({ id: root.id, clientId: p.clientId });
         return true;
@@ -226,6 +263,26 @@ export class Engine {
       default:
         fail("UNKNOWN_OPERATION", `Unknown host operation: ${operation}`);
     }
+  }
+  async authorizeFile(p) {
+    if (this.hostId !== "local" || process.argv.includes("--remote"))
+      fail(
+        "LOCAL_ONLY",
+        "Standalone file opening is available only on the desktop host.",
+      );
+    const file = await this.canonical(p.path);
+    if (!(await fs.stat(file)).isFile())
+      fail("NOT_A_FILE", "Choose a file, or use Add Folder to open a project.");
+    const owners = this.openedFiles.get(file) || new Set();
+    owners.add(p.clientId || "default");
+    this.openedFiles.set(file, owners);
+    let readonly = false;
+    try {
+      await fs.access(file, fsSync.constants.W_OK);
+    } catch {
+      readonly = true;
+    }
+    return { path: file, readonly };
   }
   async openRoot(p) {
     const canonical = await this.canonical(p.path);
@@ -331,13 +388,20 @@ export class Engine {
     const file = await this.scoped(p.path, {
       dependency: p.dependency !== false,
     });
+    const binary = p.binary === true && binaryWorkbook(file);
+    const size = (await fs.stat(file)).size;
+    if (binary && size > 10 * 1024 * 1024)
+      fail("FILE_TOO_LARGE", "Workbooks are limited to 10 MB.");
     const bytes = await fs.readFile(file);
     if (bytes.length > 50 * 1024 * 1024)
       fail("FILE_TOO_LARGE", "File exceeds the 50 MB safety limit.");
-    if (bytes.includes(0)) fail("BINARY_FILE", "This file is binary.");
+    if (!binary && bytes.includes(0))
+      fail("BINARY_FILE", "This file is binary.");
     let text;
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      text = binary
+        ? bytes.toString("base64")
+        : new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       fail(
         "UNSUPPORTED_ENCODING",
@@ -345,6 +409,7 @@ export class Engine {
       );
     }
     const bom =
+      !binary &&
       bytes.length >= 3 &&
       bytes[0] === 239 &&
       bytes[1] === 187 &&
@@ -356,7 +421,9 @@ export class Engine {
         : "LF";
     text = text.replace(/\r\n?/g, "\n");
     const stat = await fs.stat(file);
-    let readonly = ![...this.roots.values()].some((r) => inside(file, r.path));
+    let readonly =
+      !this.openedFiles.has(file) &&
+      ![...this.roots.values()].some((r) => inside(file, r.path));
     try {
       await fs.access(file, fsSync.constants.W_OK);
     } catch {
@@ -372,12 +439,15 @@ export class Engine {
       newline,
       readonly,
       size: bytes.length,
+      ...(binary ? { binary: true, encoding: "base64" } : {}),
       mtimeMs: stat.mtimeMs,
     };
     this.documents.set(file, {
       ...doc,
       writable:
-        !readonly && [...this.roots.values()].some((r) => inside(file, r.path)),
+        !readonly &&
+        (this.openedFiles.has(file) ||
+          [...this.roots.values()].some((r) => inside(file, r.path))),
     });
     return doc;
   }
@@ -429,10 +499,41 @@ export class Engine {
         /\n/g,
         newline === "CRLF" ? "\r\n" : newline === "CR" ? "\r" : "\n",
       );
-    const bytes = Buffer.from(
-      ((p.bom ?? known?.bom) ? "\uFEFF" : "") + text,
-      "utf8",
-    );
+    const binary = p.binary === true && binaryWorkbook(file);
+    if (p.binary && !binary)
+      fail(
+        "INVALID_SAVE",
+        "Binary saves are restricted to XLS, XLSX and DOCX files.",
+      );
+    const bytes = binary
+      ? workbookBytes(p.text)
+      : Buffer.from(((p.bom ?? known?.bom) ? "\uFEFF" : "") + text, "utf8");
+    // Keep the exact original bytes outside the workspace before a lossy Office rewrite.
+    if (binary) {
+      const original = await fs.readFile(file);
+      if (hash(original) !== p.expectedRevision)
+        fail("REVISION_CONFLICT", "File changed while preparing this save.");
+      const folder = path.join(
+        this.dataDir,
+        /\.docx$/i.test(file) ? "document-backups" : "workbook-backups",
+        hash(Buffer.from(file)),
+      );
+      await fs.mkdir(folder, { recursive: true, mode: 0o700 });
+      const backup = path.join(
+        folder,
+        p.expectedRevision + path.extname(file).toLowerCase(),
+      );
+      await fs
+        .writeFile(backup, original, { flag: "wx", mode: 0o600 })
+        .catch((e) => {
+          if (e.code !== "EEXIST") throw e;
+        });
+      if (hash(await fs.readFile(backup)) !== p.expectedRevision)
+        fail(
+          "BACKUP_FAILED",
+          "The original workbook backup could not be verified.",
+        );
+    }
     const temp = path.join(
       path.dirname(file),
       `.${path.basename(file)}.islet-${crypto.randomUUID()}.tmp`,
@@ -453,7 +554,7 @@ export class Engine {
         await d.sync();
         await d.close();
       } catch {}
-      return await this.read({ path: file });
+      return await this.read({ path: file, binary });
     } finally {
       if (handle) await handle.close();
       await fs.unlink(temp).catch(() => {});
@@ -462,7 +563,18 @@ export class Engine {
   async create(p) {
     const file = await this.scoped(p.path, { write: false, mustExist: false });
     if (p.directory) await fs.mkdir(file);
-    else await fs.writeFile(file, p.text || "", { flag: "wx" });
+    else {
+      if (p.binary && !binaryWorkbook(file))
+        fail(
+          "INVALID_WORKBOOK",
+          "Binary creation is restricted to XLS and XLSX workbooks.",
+        );
+      await fs.writeFile(
+        file,
+        p.binary ? workbookBytes(p.text) : p.text || "",
+        { flag: "wx" },
+      );
+    }
     return { path: file, hostId: this.hostId };
   }
   async rename(p) {
@@ -1175,6 +1287,7 @@ export class Engine {
     }
   }
   async close() {
+    await this.transfers.close();
     for (const w of this.watchers.values()) w.close();
     for (const c of this.searches.values()) c.abort();
     await Promise.all(

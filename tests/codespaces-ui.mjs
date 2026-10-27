@@ -11,6 +11,10 @@ try {
     executablePath: process.env.ISLET_CHROMIUM || chromium.executablePath(),
   });
   const page = await browser.newPage();
+  page.on("console", (m) => {
+    if (m.type() === "error") console.error(m.text());
+  });
+  page.on("pageerror", (e) => console.error("PAGEERROR", e.message));
   await page.clock.install();
   const calls = [],
     errors = [],
@@ -40,6 +44,12 @@ try {
       operation === "desktop.terminals"
     )
       result = [];
+    else if (operation === "fs.stat")
+      result = {
+        path: payload.path,
+        hostId: payload.hostId || "local",
+        isDirectory: true,
+      };
     else if (operation === "root.open") {
       result = {
         ...payload,
@@ -382,6 +392,11 @@ try {
   console.log(
     "PASS Codespaces UI: default-off/persisted disable, helper consent, mixed roots/browse, exact-ID dirty safety, create consent, owned advanced forwards, partial restore errors and no disabled polling (mock cloud)",
   );
+} catch (error) {
+  console.error(
+    await browser?.contexts()[0]?.pages()[0]?.locator("body").innerText(),
+  );
+  throw error;
 } finally {
   await browser?.close();
 }

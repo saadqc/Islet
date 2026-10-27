@@ -1,3 +1,4 @@
+import { FileJobs } from "./file-jobs.mjs";
 import { Engine, VERSION, errorObject } from "./engine.mjs";
 import { Codespaces, codespaceTransportError } from "./codespaces.mjs";
 import fs from "node:fs/promises";
@@ -34,12 +35,18 @@ export class Host {
     this.remoteRootIds = new Map();
     this.cli = cli;
     this.closing = false;
+    this.files = new FileJobs(this);
     this.codespaces = new Codespaces(this, {
       ...codespacesOptions,
       allowEnable: !remoteMode && codespacesOptions.allowEnable !== false,
     });
   }
   async request(operation, p = {}) {
+    if (operation.startsWith("files.")) {
+      if (remoteMode)
+        throw new Error("File job coordination runs on the desktop host.");
+      return this.files.request(operation.slice(6), p);
+    }
     if (operation.startsWith("codespaces."))
       return this.codespaces.request(operation.slice("codespaces.".length), p);
     if (operation === "remote.aliases") return this.aliases();
@@ -56,6 +63,29 @@ export class Host {
       this.authPrompts.delete(p.promptId);
       waiter(p.response || "");
       return true;
+    }
+    if (operation === "app.openPaths") {
+      const files = (p.paths || []).filter(
+        (value) =>
+          typeof value === "string" &&
+          path.isAbsolute(value) &&
+          !value.includes("\0"),
+      );
+      if (!files.length) throw new Error("No local files were provided.");
+      const windows = [...this.windows.values()].sort(
+        (a, b) =>
+          Number(b.focused) - Number(a.focused) || b.updated - a.updated,
+      );
+      const windowId = windows[0]?.id || "main";
+      const request = {
+        operation: "add",
+        windowId,
+        files,
+        requestId: crypto.randomUUID(),
+      };
+      this.pendingRequests.push(request);
+      this.emit("host-event", { type: "cli-request", request });
+      return { windowId, requestId: request.requestId };
     }
     if (operation === "app.parseArgs") {
       const script =
@@ -543,7 +573,7 @@ export class Host {
     this.connections.set(config.hostId, channel);
     try {
       const info = await channel.request("app.info", {}, 15000);
-      if (info.version !== VERSION)
+      if (info.version !== VERSION || info.fileProtocol !== 1)
         throw Object.assign(
           new Error(
             "Remote helper version differs from this application. Setup an upgrade.",
@@ -871,6 +901,7 @@ export class Host {
     );
   }
   async close() {
+    await this.files.close();
     if (this.closing) return;
     this.closing = true;
     await this.codespaces.close();

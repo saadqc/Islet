@@ -148,6 +148,7 @@ export class SearchService {
       ]),
     );
     const overlays = [...this.documents.documents.values()]
+      .filter((d) => !d.binary)
       .filter(
         (d) =>
           d.dirty &&
@@ -212,7 +213,13 @@ export class SearchService {
     transactions: TransactionService,
   ): Promise<EditTransaction> {
     const changes = new Map<string, { document: any; edits: any[] }>();
-    const freshMatches = new Map<string,{version:number;matches:Map<string,ReturnType<typeof searchText>[number]>}>();
+    const freshMatches = new Map<
+      string,
+      {
+        version: number;
+        matches: Map<string, ReturnType<typeof searchText>[number]>;
+      }
+    >();
     const snapshots = new Map<
       string,
       { document: any; text: string; version: number; diskRevision: string }
@@ -224,13 +231,22 @@ export class SearchService {
         (result.revision && result.revision !== document.diskRevision)
       )
         throw new Error("Search preview is stale. Search again.");
-      let cache=freshMatches.get(document.id);
-      if(!cache||cache.version!==document.version){
-        cache={version:document.version,matches:new Map(this.scanText(document.text,options).map(match=>[`${match.from}:${match.to}`,match]))};
-        freshMatches.set(document.id,cache);
+      let cache = freshMatches.get(document.id);
+      if (!cache || cache.version !== document.version) {
+        cache = {
+          version: document.version,
+          matches: new Map(
+            this.scanText(document.text, options).map((match) => [
+              `${match.from}:${match.to}`,
+              match,
+            ]),
+          ),
+        };
+        freshMatches.set(document.id, cache);
       }
-      const fresh=cache.matches.get(`${result.from}:${result.to}`);
-      if(fresh?.match!==result.match)throw new Error("Search preview changed. Search again.");
+      const fresh = cache.matches.get(`${result.from}:${result.to}`);
+      if (fresh?.match !== result.match)
+        throw new Error("Search preview changed. Search again.");
       if (!fresh) throw new Error("Search preview changed. Search again.");
       let change = changes.get(document.id);
       if (!change) {

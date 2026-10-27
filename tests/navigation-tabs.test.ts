@@ -33,7 +33,7 @@ test("semantic destinations remain unique across A B A B and retain latest exact
   assert.equal(history.back()?.scrollTop, reader.scrollTop);
 });
 
-test("explicit native multi-file drops add outside parent roots and preserve existing tabs", async () => {
+test("explicit native multi-file drops open files standalone, add only dropped folders and preserve tabs", async () => {
   const roots = ["/existing"],
     tabs = ["/existing/original.py"],
     calls: string[] = [];
@@ -68,7 +68,7 @@ test("explicit native multi-file drops add outside parent roots and preserve exi
     "/outside/b.py",
     "/outside/c.py",
   ]);
-  assert.deepEqual(calls, ["/outside", "/other/folder"]);
+  assert.deepEqual(calls, ["/other/folder"]);
   await assert.rejects(
     () => openDroppedPaths(["relative.py"], actions),
     /absolute local paths/,

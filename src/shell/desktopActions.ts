@@ -1,3 +1,4 @@
+import { copyToClipboard, pasteFiles, downloadFile } from "../files/operations";
 import { request } from "../core/bridge";
 import type { Root } from "../workspaces/model";
 import { validatePreferences } from "../settings/preferences";
@@ -68,6 +69,21 @@ export function desktopActions(
       ),
     },
   ];
+  if (root.hostId === "local") {
+    items.unshift({
+      label: folder ? "Copy Folder" : "Copy File",
+      action: run(() => copyToClipboard({ hostId: root.hostId, path })),
+    });
+    if (folder)
+      items.unshift({
+        label: "Paste",
+        action: run(() => pasteFiles({ hostId: root.hostId, path })),
+      });
+  } else
+    items.unshift({
+      label: folder ? "Download Folder as ZIP…" : "Download File…",
+      action: run(() => downloadFile({ hostId: root.hostId, path }, folder)),
+    });
   if (folder)
     items.push(
       root.hostId === "local"

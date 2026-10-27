@@ -1,0 +1,35 @@
+.file-transfers {
+  max-height: 180px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  background: var(--tree);
+  padding: 6px 14px;
+}
+.file-transfer {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 5px 0;
+}
+.file-transfer > span {
+  min-width: 160px;
+  flex: 1;
+}
+.file-transfer strong,
+.file-transfer small {
+  display: block;
+}
+.file-transfer strong {
+  font-weight: 500;
+}
+.file-transfer small {
+  color: var(--muted);
+  margin-top: 3px;
+}
+.file-transfer progress {
+  width: 160px;
+}
+.tree-row.drop-target {
+  outline: 2px solid var(--active-border);
+  background: var(--active);
+}

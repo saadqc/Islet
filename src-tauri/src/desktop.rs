@@ -147,6 +147,9 @@ fn marina_version_ok(app: &Path) -> Result<(), String> {
 }
 
 pub fn handle(operation: &str, payload: &Value) -> Result<Value, String> {
+    if operation.starts_with("desktop.clipboard.") {
+        return crate::file_clipboard::handle(operation, payload);
+    }
     if operation == "desktop.terminals" {
         return Ok(terminal_list());
     }

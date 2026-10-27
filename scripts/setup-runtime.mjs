@@ -28,7 +28,7 @@ export const NODE_ARCHIVES = Object.freeze({
 });
 const root = path.resolve(import.meta.dirname, "..");
 const resources = path.join(root, "src-tauri/resources");
-const packages = ["basedpyright", "typescript", "typescript-language-server"];
+const packages = ["basedpyright", "typescript", "typescript-language-server", "yazl"];
 export const sha256 = (bytes) =>
   crypto.createHash("sha256").update(bytes).digest("hex");
 export const run = (bin, args, options = {}) =>

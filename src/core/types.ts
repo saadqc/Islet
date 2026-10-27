@@ -1,4 +1,4 @@
-import type { OffsetChange } from './edits';
+import type { OffsetChange } from "./edits";
 export type HostId = string;
 export interface Root {
   id: string;
@@ -30,6 +30,12 @@ export interface FileSnapshot {
   encoding?: string;
   readonly?: boolean;
   image?: boolean;
+  /** XLS/XLSX/DOCX bytes are held as base64, including unsaved recovery snapshots. */
+  binary?: boolean;
+  spreadsheet?: boolean;
+  docx?: boolean;
+  /** Explicitly opened local file; does not attach its parent project. */
+  standalone?: boolean;
   size?: number;
 }
 export interface LocationSnapshot {
@@ -51,10 +57,17 @@ export interface DocumentModel extends FileSnapshot {
   pinned?: boolean;
   preview?: boolean;
   markdownMode?: "preview" | "source";
+  spreadsheetMode?: "grid" | "source";
+  docxZoom?: { value: number; mode: "manual" | "fit-width" };
   location?: LocationSnapshot;
   conflict?: FileSnapshot;
   pendingSaveText?: string;
-  lastChange?: { version:number; before:string; edits:OffsetChange[]; location?:LocationSnapshot };
+  lastChange?: {
+    version: number;
+    before: string;
+    edits: OffsetChange[];
+    location?: LocationSnapshot;
+  };
   saveState?: "saved" | "pending" | "conflicted" | "uncertain";
 }
 export const documentId = (hostId: string, path: string) =>

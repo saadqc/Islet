@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { isDocx } from "./docx/formats";
+import type { DocxHandle } from "./docx/DocxEditor";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Folder,
+  FilePlus,
+  FolderPlus,
   Search,
   Settings,
   ChevronDown,
@@ -40,6 +44,13 @@ import { useNativeMenu } from "./shell/NativeMenu";
 import { AddFolderDialog } from "./shell/AddFolderDialog";
 import { SearchDialog } from "./shell/SearchDialog";
 import { Preview } from "./markdown/Preview";
+import { NewEntryDialog } from "./shell/NewEntryDialog";
+import type { SpreadsheetHandle } from "./spreadsheets/SpreadsheetEditor";
+import { isSpreadsheet } from "./spreadsheets/formats";
+const DocxEditor = lazy(() => import("./docx/DocxEditor"));
+const SpreadsheetEditor = lazy(
+  () => import("./spreadsheets/SpreadsheetEditor"),
+);
 import { ImagePreview } from "./media/ImagePreview";
 import { CallerPanel } from "./navigation/CallerPanel";
 import { syntaxName } from "./editor/languages";
@@ -56,6 +67,16 @@ import { CodespacesPluginSettings } from "./plugins/codespaces/PluginSettings";
 import { TerminalSettings } from "./settings/TerminalSettings";
 import { ProjectSidebar } from "./shell/ProjectSidebar";
 import { desktopActions } from "./shell/desktopActions";
+import { TransferPanel } from "./files/TransferPanel";
+import {
+  copyFiles,
+  copyToClipboard,
+  pasteFiles,
+  droppedItem,
+  FILE_ITEM_MIME,
+  folderAtPoint,
+  type FileItem,
+} from "./files/operations";
 import { openDroppedPaths } from "./shell/fileDrops";
 import { attachWorkspaceRoot, mergeManifestRoots } from "./workspaces/roots";
 import { UpdateDialog, UpdateSettings, useUpdates } from "./updates/Updates";
@@ -103,6 +124,20 @@ export default function App() {
     [ready, setReady] = useState(false),
     [addPath, setAddPath] = useState(""),
     [addHost, setAddHost] = useState("local"),
+    [nativeDropTarget, setNativeDropTarget] = useState<FileItem>();
+  const [treeSelection, setTreeSelection] = useState<{
+      hostId: string;
+      path: string;
+      folder: boolean;
+    }>(),
+    [workbookCopy, setWorkbookCopy] = useState<{
+      text: string;
+      binary: boolean;
+    }>(),
+    [createTarget, setCreateTarget] = useState<{
+      hostId: string;
+      path: string;
+    }>(),
     [remoteApproved, setRemoteApproved] = useState(false),
     [pendingClose, setPendingClose] = useState<string | null>(null),
     [fragment, setFragment] = useState<string | undefined>(),
@@ -127,6 +162,8 @@ export default function App() {
   const windowId = useRef("main"),
     allowClose = useRef(false),
     persistRef = useRef<() => Promise<any>>(async () => {});
+  const docxEditor = useRef<DocxHandle>(null);
+  const spreadsheet = useRef<SpreadsheetHandle>(null);
   const editor = useRef<EditorHandle>(null),
     loaded = useRef(false),
     saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
@@ -135,6 +172,7 @@ export default function App() {
       { documentId: string; version: number; offset: number } | undefined
     >(undefined);
   persistRef.current = async () => {
+    await documents.flush();
     const snapshot = {
       schemaVersion: 1,
       id: workspaceId,
@@ -218,8 +256,25 @@ export default function App() {
     void import("@tauri-apps/api/webview")
       .then(async ({ getCurrentWebview }) => {
         const unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-          if (event.payload.type === "drop")
-            void dropFiles.current(event.payload.paths).catch(fail);
+          const value = event.payload;
+          if (value.type === "leave") {
+            setNativeDropTarget(undefined);
+            return;
+          }
+          const target = folderAtPoint(
+            value.position.x,
+            value.position.y,
+            window.devicePixelRatio,
+          );
+          if (value.type === "drop") {
+            setNativeDropTarget(undefined);
+            if (target)
+              void copyFiles(
+                value.paths.map((path) => ({ hostId: "local", path })),
+                target,
+              ).catch(fail);
+            else void dropFiles.current(value.paths).catch(fail);
+          } else setNativeDropTarget(target);
         });
         if (disposed) unlisten();
         else off = unlisten;
@@ -612,6 +667,14 @@ export default function App() {
   }
   async function validateRestored(document: DocumentModel) {
     try {
+      if (document.standalone && document.hostId === "local") {
+        const grant = await request<{ readonly: boolean }>("file.authorize", {
+          hostId: "local",
+          path: document.path,
+          clientId: languages.clientId,
+        });
+        document.readonly = document.image || grant.readonly;
+      }
       await documents.checkExternal(document.id);
       bookmarks.relocate(document);
       await request("fs.watch", {
@@ -654,13 +717,26 @@ export default function App() {
       await openManifest(req.workspace, false, req.interpreterOverrides || []);
       return;
     }
-    for (const item of req.roots || [])
-      await addRoot(
-        typeof item === "string" ? item : item.uri || item.path,
-        item.hostId,
-        typeof item === "string" ? {} : item,
-      );
+    for (const item of req.roots || []) {
+      const value = typeof item === "string" ? item : item.uri || item.path;
+      if (
+        (!item.hostId || item.hostId === "local") &&
+        !String(value).startsWith("ssh://")
+      ) {
+        const entry = await request<{ isDirectory: boolean; path: string }>(
+          "fs.stat",
+          { hostId: "local", path: value },
+        );
+        if (!entry.isDirectory) {
+          await dropFiles.current([entry.path]);
+          continue;
+        }
+      }
+      await addRoot(value, item.hostId, typeof item === "string" ? {} : item);
+    }
+    if (req.files?.length) await dropFiles.current(req.files);
   }
+
   async function addRoot(
     value: string,
     hostOverride?: string,
@@ -712,8 +788,43 @@ export default function App() {
         if (!(await addRoot(path)))
           throw Error("The dropped folder could not be added.");
       },
-      open: (path) => open("local", path, false),
+      open: async (path) => {
+        const selected = await documents.openStandalone(
+          path,
+          languages.clientId,
+        );
+        await open("local", selected.path, false);
+      },
     });
+  function newEntry(
+    directory = false,
+    target?: { hostId: string; path: string },
+  ) {
+    if (!roots.length) {
+      setError("Open a project folder before creating a file or folder.");
+      return;
+    }
+    const selected = treeSelection;
+    const fallback = doc && ownerOf(roots, doc.hostId, doc.path);
+    const initial =
+      target ||
+      (selected
+        ? {
+            hostId: selected.hostId,
+            path: selected.folder
+              ? selected.path
+              : selected.path.slice(0, selected.path.lastIndexOf("/")) || "/",
+          }
+        : fallback
+          ? {
+              hostId: fallback.hostId,
+              path: doc!.path.slice(0, doc!.path.lastIndexOf("/")) || "/",
+            }
+          : roots[0]);
+    setCreateTarget(initial);
+    setModal(directory ? "new-folder" : "new-file");
+    setMenu(null);
+  }
   async function openFile() {
     try {
       const paths = await request<string[] | string | null>("dialog.open", {
@@ -772,8 +883,9 @@ export default function App() {
     try {
       const d = await documents.open(hostId, path);
       if (
-        !ownerOf(roots, hostId, d.path) &&
-        roots.length &&
+        !(hostId === "local" && d.standalone) &&
+        !ownerOf(languages.roots, hostId, d.path) &&
+        languages.roots.length &&
         !record &&
         !dependency
       ) {
@@ -785,7 +897,12 @@ export default function App() {
       await request("fs.watch", { hostId: d.hostId, path: d.path }).catch(
         () => {},
       );
-      if (!ownerOf(roots, hostId, d.path) && roots.length) d.readonly = true;
+      if (
+        !(hostId === "local" && d.standalone) &&
+        !ownerOf(languages.roots, hostId, d.path) &&
+        languages.roots.length
+      )
+        d.readonly = true;
       bookmarks.relocate(d);
       if (d.markdownMode && !d.location)
         d.markdownMode = settings.markdownDefault;
@@ -805,6 +922,8 @@ export default function App() {
       });
       setActive(d.id);
       setFragment(hash);
+      if (offset !== undefined && d.spreadsheet && !d.binary)
+        d.spreadsheetMode = "source";
       if (offset !== undefined && d.markdownMode) d.markdownMode = "source";
       if (offset !== undefined || record) {
         offset = offset ?? d.location?.head ?? 0;
@@ -899,6 +1018,7 @@ export default function App() {
     });
   }
   async function saveAll() {
+    spreadsheet.current?.commit();
     const grouped = new Set<string>();
     const outcomes: any[] = [];
     for (const transaction of transactions.transactions.filter(
@@ -964,6 +1084,7 @@ export default function App() {
     refresh();
   }
   async function save() {
+    spreadsheet.current?.commit();
     if (doc)
       try {
         await documents.save(doc.id);
@@ -1096,6 +1217,24 @@ export default function App() {
   }
   function command(id: string) {
     if (updates.frozenRef.current) return;
+    if (
+      ["copy", "paste"].includes(id) &&
+      document.activeElement?.closest(".tree") &&
+      treeSelection?.hostId === "local"
+    ) {
+      const item = { hostId: "local", path: treeSelection.path };
+      void (
+        id === "copy"
+          ? copyToClipboard(item)
+          : pasteFiles({
+              ...item,
+              path: treeSelection.folder
+                ? item.path
+                : item.path.slice(0, item.path.lastIndexOf("/")) || "/",
+            })
+      ).catch(fail);
+      return;
+    }
     id =
       (
         {
@@ -1111,6 +1250,8 @@ export default function App() {
       return;
     }
     const actions: Record<string, () => void> = {
+      newFile: () => newEntry(),
+      newFolder: () => newEntry(true),
       save: () => void save(),
       closeTab: () => {
         if (active) close(active);
@@ -1131,6 +1272,9 @@ export default function App() {
       undoGroup: () => void transactions.undo().catch(fail),
     };
     if (actions[id]) actions[id]();
+    else if (doc?.docx) void docxEditor.current?.command(id).catch(fail);
+    else if (doc?.spreadsheet && doc.spreadsheetMode !== "source")
+      spreadsheet.current?.command(id);
     else editor.current?.command(id);
     setMenu(null);
   }
@@ -1252,6 +1396,17 @@ export default function App() {
   useEffect(() => {
     const custom = (event: KeyboardEvent) => {
       if (modal || event.defaultPrevented) return;
+      // CE keeps its active grid globally, even when focus moves to body.
+      // Handle Save before its document-level CSV download shortcut.
+      if (
+        (doc?.docx || (doc?.spreadsheet && doc.spreadsheetMode !== "source")) &&
+        matchesBinding(event, settings.shortcuts.save || "Mod-s")
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        void save();
+        return;
+      }
       for (const [id, binding] of Object.entries(settings.shortcuts || {})) {
         if (binding && matchesBinding(event, binding)) {
           event.preventDefault();
@@ -1273,7 +1428,14 @@ export default function App() {
       }
       if (modal) return;
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.shiftKey && ["f", "r"].includes(e.key.toLowerCase())) {
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        newEntry();
+      } else if (
+        mod &&
+        e.shiftKey &&
+        ["f", "r"].includes(e.key.toLowerCase())
+      ) {
         e.preventDefault();
         search(e.key.toLowerCase() === "r");
       } else if (mod && e.key === "s") {
@@ -1553,6 +1715,24 @@ export default function App() {
               <span />
               <button
                 className="icon small"
+                title="New File…"
+                aria-label="New File"
+                disabled={!roots.length}
+                onClick={() => newEntry()}
+              >
+                <FilePlus size={15} />
+              </button>
+              <button
+                className="icon small"
+                title="New Folder…"
+                aria-label="New Folder"
+                disabled={!roots.length}
+                onClick={() => newEntry(true)}
+              >
+                <FolderPlus size={15} />
+              </button>
+              <button
+                className="icon small"
                 title="Find in Files"
                 onClick={() => search()}
               >
@@ -1568,13 +1748,49 @@ export default function App() {
             </div>
             <ProjectTree
               roots={roots}
-              selected={doc ? doc.hostId + ":" + doc.path : undefined}
+              selected={
+                treeSelection
+                  ? treeSelection.hostId + ":" + treeSelection.path
+                  : doc
+                    ? doc.hostId + ":" + doc.path
+                    : undefined
+              }
+              folderOpenMode={settings.folderOpenMode}
+              dropTarget={nativeDropTarget}
+              onCopy={(item) => void copyToClipboard(item).catch(fail)}
+              onPaste={(target) => void pasteFiles(target).catch(fail)}
+              onDropItems={(sources, target) =>
+                void copyFiles(sources, target).catch(fail)
+              }
+              onSelect={(root, path, folder) =>
+                setTreeSelection({ hostId: root.hostId, path, folder })
+              }
               onOpen={(h, p) => void open(h, p, false)}
               onMenu={(e, root, path, folder) =>
                 setMenu({
                   x: e.clientX,
                   y: e.clientY,
                   items: [
+                    {
+                      label: "New File…",
+                      action: () =>
+                        newEntry(false, {
+                          hostId: root.hostId,
+                          path: folder
+                            ? path
+                            : path.slice(0, path.lastIndexOf("/")) || "/",
+                        }),
+                    },
+                    {
+                      label: "New Folder…",
+                      action: () =>
+                        newEntry(true, {
+                          hostId: root.hostId,
+                          path: folder
+                            ? path
+                            : path.slice(0, path.lastIndexOf("/")) || "/",
+                        }),
+                    },
                     ...(folder
                       ? [
                           {
@@ -1685,7 +1901,24 @@ export default function App() {
             )}
           </ProjectSidebar>
         )}
-        <section className="editor-island">
+        <section
+          className="editor-island"
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes(FILE_ITEM_MIME))
+              event.preventDefault();
+          }}
+          onDrop={(event) => {
+            const item = droppedItem(event.dataTransfer);
+            if (item) {
+              event.preventDefault();
+              void (async () => {
+                const stat = await request<any>("fs.stat", item);
+                if (stat.isDirectory) await addRoot(item.path, item.hostId);
+                else await open(item.hostId, item.path, false);
+              })().catch(fail);
+            }
+          }}
+        >
           <div className="tabbar">
             <div className="navigation-buttons">
               <button
@@ -1821,9 +2054,19 @@ export default function App() {
                   {doc.hostId !== "local" ? doc.hostId : ""}
                 </span>
                 <span className="muted file-format">
-                  {doc.image ? "Image" : syntaxName(doc.path, doc.text)}
+                  {doc.docx
+                    ? "Word document"
+                    : doc.spreadsheet
+                      ? /\.csv$/i.test(doc.path)
+                        ? "CSV"
+                        : /\.xlsx$/i.test(doc.path)
+                          ? "XLSX"
+                          : "XLS"
+                      : doc.image
+                        ? "Image"
+                        : syntaxName(doc.path, doc.text)}
                 </span>
-                {!doc.image && (
+                {!doc.image && !doc.spreadsheet && !doc.docx && (
                   <button
                     className="icon"
                     title="Toggle caller panel"
@@ -1837,6 +2080,20 @@ export default function App() {
                     }
                   >
                     <GitBranch size={14} />
+                  </button>
+                )}
+                {doc.spreadsheet && !doc.binary && (
+                  <button
+                    className="mode-button"
+                    onClick={() => {
+                      doc.spreadsheetMode =
+                        doc.spreadsheetMode === "source" ? "grid" : "source";
+                      refresh();
+                    }}
+                  >
+                    {doc.spreadsheetMode === "source"
+                      ? "Show Grid"
+                      : "Edit CSV Source"}
                   </button>
                 )}
                 {doc.markdownMode && (
@@ -1864,7 +2121,7 @@ export default function App() {
                   </button>
                 </div>
               )}
-              {doc.text.length > 5 * 1024 * 1024 && (
+              {!doc.binary && doc.text.length > 5 * 1024 * 1024 && (
                 <div className="conflict-banner">
                   Large-file mode · automatic language analysis is paused for
                   files over 5 MB.
@@ -1872,6 +2129,8 @@ export default function App() {
               )}
               {settings.callerPanel &&
                 !doc.image &&
+                !doc.spreadsheet &&
+                !doc.docx &&
                 doc.markdownMode !== "preview" && (
                   <CallerPanel
                     document={doc}
@@ -1889,7 +2148,45 @@ export default function App() {
                   />
                 )}
               <div className="editor-area">
-                {doc.image ? (
+                {doc.docx ? (
+                  <Suspense fallback={<p>Opening document…</p>}>
+                    <DocxEditor
+                      key={doc.id}
+                      ref={docxEditor}
+                      document={doc}
+                      store={documents}
+                      onError={fail}
+                    />
+                  </Suspense>
+                ) : doc.spreadsheet && doc.spreadsheetMode !== "source" ? (
+                  <Suspense fallback={<p>Opening spreadsheet…</p>}>
+                    <SpreadsheetEditor
+                      key={doc.id}
+                      ref={spreadsheet}
+                      onSave={() => void save()}
+                      document={doc}
+                      onError={fail}
+                      onSaveCopy={() => {
+                        void import("./spreadsheets/workbook")
+                          .then(({ xlsxCopy }) => {
+                            setWorkbookCopy(xlsxCopy(doc.text));
+                            setCreateTarget({
+                              hostId: doc.hostId,
+                              path:
+                                doc.path.slice(0, doc.path.lastIndexOf("/")) ||
+                                "/",
+                            });
+                            setModal("copy-workbook");
+                          })
+                          .catch(fail);
+                      }}
+                      onChange={(text) => {
+                        documents.change(doc.id, text);
+                        doc.preview = false;
+                      }}
+                    />
+                  </Suspense>
+                ) : doc.image ? (
                   <ImagePreview document={doc} />
                 ) : doc.markdownMode === "preview" ? (
                   <Preview
@@ -1984,6 +2281,11 @@ export default function App() {
           )}
         </section>
       </main>
+      <TransferPanel
+        onComplete={() =>
+          setRoots(languages.roots.map((root) => ({ ...root })))
+        }
+      />
       {dirty.length > 0 && (
         <div className="changes-bar">
           <span>
@@ -2038,13 +2340,17 @@ export default function App() {
                 : ""}
         </span>
         <span>
-          {doc && doc.markdownMode !== "preview"
+          {doc &&
+          (!doc.spreadsheet || doc.spreadsheetMode === "source") &&
+          doc.markdownMode !== "preview"
             ? `${doc.text.slice(0, position?.head ?? 0).split("\n").length}:${(position?.head ?? 0) - (doc.text.lastIndexOf("\n", (position?.head ?? 0) - 1) + 1) + 1}`
             : ""}
         </span>
-        <span>{doc?.newline || "LF"}</span>
-        <span>UTF-8</span>
-        <span>4 spaces</span>
+        <span>
+          {doc?.docx ? "DOCX" : doc?.binary ? "Workbook" : doc?.newline || "LF"}
+        </span>
+        <span>{doc?.binary ? "Binary" : "UTF-8"}</span>
+        {!doc?.spreadsheet && !doc?.docx && <span>4 spaces</span>}
       </footer>
       {error && (
         <div className="notification" role="alert">
@@ -2091,6 +2397,36 @@ export default function App() {
           ))}
         </div>
       )}
+      {(modal === "new-file" ||
+        modal === "new-folder" ||
+        modal === "copy-workbook") &&
+        createTarget && (
+          <NewEntryDialog
+            roots={roots}
+            initial={createTarget}
+            initialName={
+              modal === "copy-workbook"
+                ? base(doc?.path || "workbook").replace(/\.xlsx?$/i, "") +
+                  "-copy.xlsx"
+                : ""
+            }
+            content={modal === "copy-workbook" ? workbookCopy : undefined}
+            directory={modal === "new-folder"}
+            onClose={() => setModal(null)}
+            onCreated={(hostId, path, directory) => {
+              setModal(null);
+              setRoots(roots.map((root) => ({ ...root })));
+              setTreeSelection({
+                hostId,
+                path: directory
+                  ? path.slice(0, path.lastIndexOf("/")) || "/"
+                  : path,
+                folder: directory,
+              });
+              if (!directory) void open(hostId, path, false);
+            }}
+          />
+        )}
       {modal === "codespaces" && codespacesSettings.enabled && (
         <CodespacesPanel
           client={codespaces}
@@ -2451,6 +2787,22 @@ export default function App() {
               Show caller panel above the editor (up to 5 levels)
             </label>
             <label>
+              Expand folders with
+              <select
+                value={settings.folderOpenMode}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    folderOpenMode: e.target
+                      .value as Preferences["folderOpenMode"],
+                  })
+                }
+              >
+                <option value="double">Double click</option>
+                <option value="single">Single click</option>
+              </select>
+            </label>
+            <label>
               Markdown default
               <select
                 value={settings.markdownDefault}
@@ -2628,10 +2980,19 @@ export default function App() {
               Your buffer and the file on {doc.hostId} differ. Review both
               before choosing.
             </p>
-            <div className="diff">
-              <pre>{doc.text}</pre>
-              <pre>{doc.conflict.text}</pre>
-            </div>
+            {doc.binary ? (
+              <p>
+                This {doc.docx ? "document" : "workbook"} changed on disk.
+                Reload to inspect the disk version, or keep your edited buffer
+                for the next save. The original bytes are backed up before each
+                save.
+              </p>
+            ) : (
+              <div className="diff">
+                <pre>{doc.text}</pre>
+                <pre>{doc.conflict.text}</pre>
+              </div>
+            )}
             <footer>
               <button onClick={() => setModal(null)}>Keep Reviewing</button>
               <button
@@ -2707,6 +3068,16 @@ export default function App() {
                     const id = documentId(root.hostId, path);
                     if (documents.documents.get(id)?.dirty)
                       throw Error("Save this file before renaming it.");
+                    if (
+                      isDocx(path) !== isDocx(addPath) ||
+                      isSpreadsheet(path) !== isSpreadsheet(addPath) ||
+                      (isSpreadsheet(path) &&
+                        path.split(".").pop()?.toLowerCase() !==
+                          addPath.split(".").pop()?.toLowerCase())
+                    )
+                      throw Error(
+                        "Keep the Office file extension when renaming. Renaming does not convert file formats.",
+                      );
                     const newPath =
                       path.slice(0, path.lastIndexOf("/") + 1) + addPath;
                     await request("fs.rename", {

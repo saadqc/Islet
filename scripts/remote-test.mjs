@@ -157,6 +157,54 @@ try {
   });
   assert.notEqual(localRoot.id, remoteRoot.id);
   assert.equal(remoteRoot.hostId, config.hostId);
+  // Exercise real OpenSSH framing with binary chunks and helper-side ZIP staging.
+  await fs.mkdir(path.join(temp, "outbound"));
+  await fs.writeFile(
+    path.join(temp, "outbound", "bytes.bin"),
+    Buffer.alloc(1200003, 173),
+  );
+  await fs.mkdir(path.join(project, "uploads"));
+  await fs.mkdir(path.join(project, "downloads"));
+  const transfer = async (operation, payload) => {
+    const started = await host.request(operation, payload);
+    const state = host.files.jobs.get(started.id);
+    await state.promise;
+    assert.equal(state.status, "complete", state.error);
+    return state;
+  };
+  await transfer("files.copy", {
+    sources: [{ hostId: "local", path: path.join(temp, "outbound") }],
+    target: { hostId: config.hostId, path: path.join(project, "uploads") },
+  });
+  assert.deepEqual(
+    await fs.readFile(path.join(project, "uploads/outbound/bytes.bin")),
+    await fs.readFile(path.join(temp, "outbound/bytes.bin")),
+  );
+  await transfer("files.download", {
+    hostId: config.hostId,
+    path: path.join(project, "uploads/outbound"),
+    destination: path.join(temp, "download.zip"),
+  });
+  assert.deepEqual(
+    (
+      await exec(
+        "/usr/bin/unzip",
+        ["-p", path.join(temp, "download.zip"), "outbound/bytes.bin"],
+        { encoding: "buffer", maxBuffer: 2000000 },
+      )
+    ).stdout,
+    await fs.readFile(path.join(temp, "outbound/bytes.bin")),
+  );
+  await transfer("files.copy", {
+    sources: [
+      { hostId: config.hostId, path: path.join(project, "uploads/outbound") },
+    ],
+    target: { hostId: "local", path: path.join(project, "downloads") },
+  });
+  assert.deepEqual(
+    await fs.readFile(path.join(project, "downloads/outbound/bytes.bin")),
+    await fs.readFile(path.join(temp, "outbound/bytes.bin")),
+  );
   const imagePath = path.join(project, "preview.png");
   await fs.copyFile(path.join(root, "src-tauri/icons/128x128.png"), imagePath);
   const imageStat = await host.request("fs.stat", {

@@ -105,6 +105,8 @@ jobs:
         env:
           EXPECTED_ARCH: arm64
         run: node scripts/package-release.mjs --out-dir release-artifacts
+      - name: Package application and AGPL dependency sources
+        run: node scripts/package-source.mjs
       - name: Create and verify signed automatic update archive
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

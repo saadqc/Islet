@@ -1,3 +1,4 @@
+import { sourceNames, SUPERDOC_SOURCE } from "./package-source.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -86,6 +87,24 @@ export async function verifiedArtifacts({
     [names.signature, signatureBytes],
     [names.feed, feedBytes],
   ]);
+  const source = sourceNames(version);
+  const sourceMetadata = JSON.parse(
+    await fs.readFile(path.join(directory, source.metadata), "utf8"),
+  );
+  const sourceBytes = await fs.readFile(path.join(directory, source.archive));
+  if (
+    sourceMetadata.version !== version ||
+    sourceMetadata.commit !== commit ||
+    sourceMetadata.license !== "AGPL-3.0-only" ||
+    sourceMetadata.archive !== source.archive ||
+    sourceMetadata.bytes !== sourceBytes.length ||
+    sourceMetadata.sha256 !== digest(sourceBytes) ||
+    sourceMetadata.superdoc?.commit !== SUPERDOC_SOURCE.commit ||
+    sourceMetadata.superdoc?.sha256 !== SUPERDOC_SOURCE.sha256 ||
+    sourceMetadata.superdoc?.version !== SUPERDOC_SOURCE.version
+  )
+    throw new Error("Source distribution differs from the validated release.");
+  contents.set(source.archive, sourceBytes);
   const checksum = Buffer.from(
     [...contents]
       .map(([name, bytes]) => `${digest(bytes)}  ${name}`)

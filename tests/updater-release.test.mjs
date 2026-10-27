@@ -1,3 +1,4 @@
+import { sourceNames, SUPERDOC_SOURCE } from "../scripts/package-source.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -259,6 +260,21 @@ async function fixtureDirectory(t) {
     [names.metadata, JSON.stringify(updater)],
   ])
     await fs.writeFile(path.join(directory, name), data);
+  const source = sourceNames(version),
+    sourceBytes = Buffer.from("complete release source fixture");
+  await fs.writeFile(path.join(directory, source.archive), sourceBytes);
+  await fs.writeFile(
+    path.join(directory, source.metadata),
+    JSON.stringify({
+      version,
+      commit,
+      license: "AGPL-3.0-only",
+      archive: source.archive,
+      bytes: sourceBytes.length,
+      sha256: digest(sourceBytes),
+      superdoc: SUPERDOC_SOURCE,
+    }),
+  );
   return {
     directory,
     version,
@@ -272,7 +288,7 @@ async function fixtureDirectory(t) {
 test("publisher rejects modified artifacts and DMG/archive provenance mismatch", async (t) => {
   const fixture = await fixtureDirectory(t);
   const result = await verifiedArtifacts(fixture);
-  assert.equal(result.expected.size, 5);
+  assert.equal(result.expected.size, 6);
   assert.ok(result.expected.has("SHA256SUMS.txt"));
   await fs.writeFile(
     path.join(fixture.directory, fixture.names.metadata),
@@ -417,4 +433,17 @@ test("uploaded asset validation rejects extras and duplicates", () => {
       ),
     /verification/,
   );
+});
+
+test("publisher requires the matching source distribution before uploading a release", async (t) => {
+  const fixture = await fixtureDirectory(t);
+  const source = sourceNames(fixture.version);
+  const file = path.join(fixture.directory, source.archive);
+  await fs.writeFile(file, "tampered source");
+  await assert.rejects(
+    verifiedArtifacts(fixture),
+    /Source distribution differs/,
+  );
+  await fs.unlink(file);
+  await assert.rejects(verifiedArtifacts(fixture), { code: "ENOENT" });
 });

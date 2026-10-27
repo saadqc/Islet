@@ -1,4 +1,5 @@
 export const shortcuts: Record<string, { label: string; binding: string }> = {
+  newFile: { label: "New File…", binding: "Mod-n" },
   save: { label: "Save", binding: "Mod-s" },
   definition: { label: "Go to Definition", binding: "Mod-b" },
   references: { label: "Find References", binding: "Alt-F7" },

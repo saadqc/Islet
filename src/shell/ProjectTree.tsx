@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, ChevronDown, RefreshCw } from "lucide-react";
+import {
+  FILE_ITEM_MIME,
+  droppedItem,
+  type FileItem,
+} from "../files/operations";
 import { FileIcon } from "../icons/FileIcon";
 import { request } from "../core/bridge";
 import { Root, Entry, base } from "../workspaces/model";
@@ -12,6 +17,12 @@ function Node({
   onMenu,
   selected,
   folder = true,
+  folderOpenMode,
+  onSelect,
+  onDropItems,
+  onCopy,
+  onPaste,
+  dropTarget,
 }: {
   root: Root;
   path: string;
@@ -26,7 +37,14 @@ function Node({
   ) => void;
   selected?: string;
   folder?: boolean;
+  onDropItems?: (sources: FileItem[], target: FileItem) => void;
+  onCopy?: (item: FileItem) => void;
+  onPaste?: (target: FileItem) => void;
+  dropTarget?: FileItem;
+  folderOpenMode: "single" | "double";
+  onSelect: (root: Root, path: string, folder: boolean) => void;
 }) {
+  const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(depth === 0),
     [entries, setEntries] = useState<Entry[]>([]),
     [error, setError] = useState("");
@@ -44,19 +62,108 @@ function Node({
   return (
     <>
       <div
-        className={`tree-row ${selected === root.hostId + ":" + path ? "selected" : ""}`}
+        className={`tree-row ${folder && (hover || (dropTarget?.hostId === root.hostId && dropTarget.path === path)) ? "drop-target" : ""} ${selected === root.hostId + ":" + path ? "selected" : ""}`}
+        draggable
+        data-drop-host={folder ? root.hostId : undefined}
+        data-drop-path={folder ? path : undefined}
+        onDragStart={(event) => {
+          event.dataTransfer.setData(
+            FILE_ITEM_MIME,
+            JSON.stringify({ hostId: root.hostId, path }),
+          );
+          event.dataTransfer.effectAllowed = "copy";
+        }}
+        onDragOver={(event) => {
+          if (folder && event.dataTransfer.types.includes(FILE_ITEM_MIME)) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "copy";
+            setHover(true);
+          }
+        }}
+        onDragLeave={() => setHover(false)}
+        onDrop={(event) => {
+          const item = droppedItem(event.dataTransfer);
+          setHover(false);
+          if (folder && item) {
+            event.preventDefault();
+            event.stopPropagation();
+            onDropItems?.([item], { hostId: root.hostId, path });
+          }
+        }}
+        role="treeitem"
+        tabIndex={0}
+        aria-label={name}
+        aria-expanded={folder ? expanded : undefined}
+        aria-selected={selected === root.hostId + ":" + path}
         style={{ paddingLeft: 10 + depth * 15 }}
         onContextMenu={(e) => {
           e.preventDefault();
           onMenu(e, root, path, folder);
         }}
-        onClick={() =>
-          folder ? setExpanded(!expanded) : onOpen(root.hostId, path, true)
-        }
-        onDoubleClick={() => !folder && onOpen(root.hostId, path, false)}
+        onClick={(e) => {
+          onSelect(root, path, folder);
+          if (folder) {
+            if (folderOpenMode === "single" && e.detail === 1)
+              setExpanded((value) => !value);
+          } else onOpen(root.hostId, path, true);
+        }}
+        onDoubleClick={() => {
+          if (folder) {
+            if (folderOpenMode === "double") setExpanded((value) => !value);
+          } else onOpen(root.hostId, path, false);
+        }}
+        onKeyDown={(e) => {
+          if (
+            (e.metaKey || e.ctrlKey) &&
+            root.hostId === "local" &&
+            ["c", "v"].includes(e.key.toLowerCase())
+          ) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.key.toLowerCase() === "c")
+              onCopy?.({ hostId: root.hostId, path });
+            else
+              onPaste?.({
+                hostId: root.hostId,
+                path: folder
+                  ? path
+                  : path.slice(0, path.lastIndexOf("/")) || "/",
+              });
+            return;
+          }
+          if (
+            folder &&
+            ["Enter", " ", "ArrowRight", "ArrowLeft"].includes(e.key)
+          ) {
+            e.preventDefault();
+            e.stopPropagation();
+            onSelect(root, path, folder);
+            setExpanded((value) =>
+              e.key === "ArrowRight"
+                ? true
+                : e.key === "ArrowLeft"
+                  ? false
+                  : !value,
+            );
+          } else if (!folder && e.key === "Enter") {
+            e.preventDefault();
+            onOpen(root.hostId, path, false);
+          }
+        }}
         title={`${root.hostId} · ${path}`}
       >
-        <span className="tree-chevron">
+        <span
+          className="tree-chevron"
+          onClick={(e) => {
+            if (folder) {
+              e.stopPropagation();
+              onSelect(root, path, folder);
+              setExpanded((value) => !value);
+            }
+          }}
+          aria-hidden="true"
+        >
           {folder ? (
             expanded ? (
               <ChevronDown size={13} />
@@ -109,6 +216,12 @@ function Node({
                   onOpen={onOpen}
                   onMenu={onMenu}
                   selected={selected}
+                  folderOpenMode={folderOpenMode}
+                  onSelect={onSelect}
+                  onDropItems={onDropItems}
+                  onCopy={onCopy}
+                  onPaste={onPaste}
+                  dropTarget={dropTarget}
                 />
               ))
           )}
@@ -122,6 +235,12 @@ export function ProjectTree({
   onOpen,
   onMenu,
   selected,
+  folderOpenMode = "double",
+  onSelect = () => {},
+  onDropItems,
+  onCopy,
+  onPaste,
+  dropTarget,
 }: {
   roots: Root[];
   onOpen: (host: string, path: string, preview?: boolean) => void;
@@ -132,6 +251,12 @@ export function ProjectTree({
     folder: boolean,
   ) => void;
   selected?: string;
+  folderOpenMode?: "single" | "double";
+  onDropItems?: (sources: FileItem[], target: FileItem) => void;
+  onCopy?: (item: FileItem) => void;
+  onPaste?: (target: FileItem) => void;
+  dropTarget?: FileItem;
+  onSelect?: (root: Root, path: string, folder: boolean) => void;
 }) {
   return (
     <div className="tree" role="tree" aria-label="Workspace projects">
@@ -146,6 +271,12 @@ export function ProjectTree({
               onOpen={onOpen}
               onMenu={onMenu}
               selected={selected}
+              folderOpenMode={folderOpenMode}
+              onSelect={onSelect}
+              onDropItems={onDropItems}
+              onCopy={onCopy}
+              onPaste={onPaste}
+              dropTarget={dropTarget}
             />
             {root.state && root.state !== "ready" && (
               <div className="connection-state">{root.state}</div>
