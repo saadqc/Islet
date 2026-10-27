@@ -1,4 +1,4 @@
-Islet 0.1.6 adds offline spreadsheet and Word document editing, plus file-management improvements.
+Islet 0.1.7 adds offline spreadsheet and Word document editing, plus file-management improvements.
 
 - Edit CSV, XLS and XLSX using locally bundled Jspreadsheet CE and SheetJS CE. Create, rename, duplicate and delete worksheets, with structural Undo/Redo. CSV also has a source view that preserves identifiers, delimiters and line endings.
 - Open, edit, save and recover DOCX documents using SuperDoc 1.46.2. Pages are centered with document margins intact. A bottom zoom bar provides 25–400%, Fit width, reset and Cmd/Ctrl +/−/0 shortcuts. Telemetry is disabled; editing requires no vendor service.

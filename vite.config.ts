@@ -18,7 +18,19 @@ export default defineConfig({
           throw new Error(
             "Review the Jspreadsheet CSP adapter after upgrading CE.",
           );
-        return { code: code.replace(handler, ""), map: null };
+        // CE closes an active editor on scroll. Focusing an edge cell's input
+        // must not trigger another browser scroll that immediately closes it.
+        const editorFocus = "i.focus(),i.value=s";
+        if (!code.includes(editorFocus))
+          throw new Error(
+            "Review the Jspreadsheet cell-focus adapter after upgrading CE.",
+          );
+        return {
+          code: code
+            .replace(handler, "")
+            .replace(editorFocus, "i.focus({preventScroll:true}),i.value=s"),
+          map: null,
+        };
       },
     },
   ],
