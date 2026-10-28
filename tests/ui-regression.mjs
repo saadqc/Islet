@@ -26,7 +26,7 @@ async function setupRoutes(target,initialRequest){
   const {operation,payload}=route.request().postDataJSON();
   if(operation==='lsp.send')lspTraffic.push(payload.message);
   if(operation==='app.registerWindow'){windowIds.set(target,payload.windowId);if(target===page)testWindowId=payload.windowId;}
-  if(operation==='session.save'&&payload.key.startsWith('recovery:')&&delayedWrite?.page===target){const delayed=delayedWrite;delayed.requests++;if(!delayed.started){delayed.started=true;delayed.enter(payload.value);await delayed.wait;}delayed.writes.push(payload.value.documents.find(doc=>doc.path.endsWith('/notes.txt'))?.text);}
+  if(operation==='session.save'&&payload.key.startsWith('recovery:')&&delayedWrite?.page===target&&(delayedWrite.started||payload.value.documents?.some(doc=>doc.path.endsWith('/notes.txt')&&doc.text==='DELAYED OLDER'))){const delayed=delayedWrite;delayed.requests++;if(!delayed.started){delayed.started=true;delayed.enter(payload.value);await delayed.wait;}delayed.writes.push(payload.value.documents.find(doc=>doc.path.endsWith('/notes.txt'))?.text);}
   if(operation==='session.register'){if(!freezeSession)recoveryEntries.set(payload.entry.key,structuredClone(payload.entry));await route.fulfill({json:{result:true}});return;}
   if(operation==='session.list'){await route.fulfill({json:{result:[...recoveryEntries.values()].sort((a,b)=>b.updated-a.updated)}});return;}
   if(/^(session|recovery)\.(load|save)$/.test(operation)){const key=operation.split('.')[0]+':'+payload.key;if(operation.endsWith('.save')&&!freezeSession)persisted.set(key,structuredClone(payload.value));await route.fulfill({json:{result:operation.endsWith('.load')?persisted.get(key)??null:true}});return;}

@@ -11,7 +11,7 @@ const fixture = await fs.realpath(
 const evidence = path.join(
   os.homedir(),
   "islet-ui-screens",
-  "offline-docx-files-20261028",
+  "offline-docx-files-20261029",
 );
 await fs.mkdir(evidence, { recursive: true });
 await fs.mkdir(path.join(fixture, "nested"));

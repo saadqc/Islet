@@ -59,7 +59,13 @@ import {
   validatePreferences,
   type Preferences,
 } from "./settings/preferences";
-import { shortcuts, matchesBinding } from "./settings/shortcuts";
+import {
+  shortcuts,
+  matchesBinding,
+  bindingFor,
+  isEditorTextControl,
+} from "./settings/shortcuts";
+import { KeymapSettings } from "./settings/KeymapSettings";
 import { base, type Root, parseLocation } from "./workspaces/model";
 import { CodespacesClient } from "./plugins/codespaces/client";
 import { CodespacesPanel } from "./plugins/codespaces/CodespacesPanel";
@@ -157,6 +163,34 @@ export default function App() {
   const recoveryKey = useRef("recovery:" + crypto.randomUUID());
   const handledRequests = useRef(new Set<string>());
   const [referenceIndex, setReferenceIndex] = useState(-1);
+  const recentTabs = useRef<string[]>([]);
+  const switchOrder = useRef<{ order: string[]; index: number } | null>(null);
+  const [switcher, setSwitcher] = useState<string[]>([]);
+  useEffect(() => {
+    if (active)
+      recentTabs.current = [
+        active,
+        ...recentTabs.current.filter((id) => id !== active),
+      ];
+  }, [active]);
+  function tabStep(direction: number, recent = false) {
+    const order = recent
+      ? switchOrder.current?.order ||
+        recentTabs.current.filter((id) => tabs.includes(id))
+      : tabs;
+    if (order.length < 2) return;
+    const index =
+      ((recent ? (switchOrder.current?.index ?? 0) : order.indexOf(active)) +
+        direction +
+        order.length) %
+      order.length;
+    if (recent) {
+      switchOrder.current = { order, index };
+      setSwitcher(order);
+    }
+    setActive(order[index]);
+  }
+
   const bookmarkEditing = useRef<string | undefined>(undefined);
   const menuOrigin = useRef<LocationSnapshot | undefined>(undefined);
   const windowId = useRef("main"),
@@ -1121,11 +1155,7 @@ export default function App() {
         ? await languages.references(doc, offset)
         : await languages.definition(doc, offset);
       if (!found.length) {
-        setError(
-          "No semantic " +
-            (references ? "references" : "definition") +
-            " found.",
-        );
+        editor.current?.notice("No reference found", offset);
         return;
       }
       if (found.length === 1 && !references) await navigate(found[0]);
@@ -1218,6 +1248,24 @@ export default function App() {
   function command(id: string) {
     if (updates.frozenRef.current) return;
     if (
+      isEditorTextControl(document.activeElement) &&
+      [
+        "copy",
+        "cut",
+        "paste",
+        "select-all",
+        "selectAll",
+        "undo",
+        "redo",
+      ].includes(id)
+    ) {
+      document.execCommand(
+        id === "select-all" || id === "selectAll" ? "selectAll" : id,
+      );
+      return;
+    }
+    if (modal) return;
+    if (
       ["copy", "paste"].includes(id) &&
       document.activeElement?.closest(".tree") &&
       treeSelection?.hostId === "local"
@@ -1252,6 +1300,23 @@ export default function App() {
     const actions: Record<string, () => void> = {
       newFile: () => newEntry(),
       newFolder: () => newEntry(true),
+      openFile: () => void openFile(),
+      settings: () => setModal("settings"),
+      saveAll: () => void saveAll().catch(fail),
+      toggleProject: () => setTreeVisible((v) => !v),
+      nextTab: () => tabStep(1),
+      previousTab: () => tabStep(-1),
+      switchTab: () => tabStep(1, true),
+      switchTabBack: () => tabStep(-1, true),
+      reopenTab: () => {
+        const id = [...documents.documents.keys()]
+          .reverse()
+          .find((id) => !tabs.includes(id));
+        if (id) {
+          setTabs([...tabs, id]);
+          setActive(id);
+        }
+      },
       save: () => void save(),
       closeTab: () => {
         if (active) close(active);
@@ -1278,6 +1343,25 @@ export default function App() {
     else editor.current?.command(id);
     setMenu(null);
   }
+  useEffect(() => {
+    const clipboard = (event: ClipboardEvent) => {
+      if (
+        modal ||
+        isEditorTextControl(event.target) ||
+        !(event.target instanceof Element && event.target.closest(".tree")) ||
+        treeSelection?.hostId !== "local"
+      )
+        return;
+      event.preventDefault();
+      command(event.type);
+    };
+    document.addEventListener("copy", clipboard);
+    document.addEventListener("paste", clipboard);
+    return () => {
+      document.removeEventListener("copy", clipboard);
+      document.removeEventListener("paste", clipboard);
+    };
+  }, [treeSelection, modal, doc, roots]);
   function editorMenu(x: number, y: number, offset?: number) {
     menuOrigin.current = capture();
     const items: MenuItem[] = [
@@ -1395,106 +1479,121 @@ export default function App() {
   }
   useEffect(() => {
     const custom = (event: KeyboardEvent) => {
-      if (modal || event.defaultPrevented) return;
       if (
-        doc?.docx &&
-        (event.metaKey || event.ctrlKey) &&
+        event.defaultPrevented ||
+        modal ||
+        updates.frozenRef.current ||
+        (event.target instanceof Element &&
+          event.target.closest('[role="dialog"]'))
+      )
+        return;
+      if (event.key === "Escape") {
+        setMenu(null);
+        setSwitcher([]);
+        switchOrder.current = null;
+        return;
+      }
+      const entry =
+        Object.keys(shortcuts).find((id) =>
+          matchesBinding(
+            event,
+            bindingFor(id, settings.shortcuts, settings.keymap),
+          ),
+        ) ||
+        (doc?.docx &&
         !event.shiftKey &&
         !event.altKey &&
-        ["f", "r"].includes(event.key.toLowerCase())
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        command(event.key.toLowerCase() === "r" ? "replace" : "find");
-        return;
-      }
-      // CE keeps its active grid globally, even when focus moves to body.
-      // Handle Save before its document-level CSV download shortcut.
+        (event.metaKey || event.ctrlKey) &&
+        ["f", "r"].includes(event.key.toLowerCase()) &&
+        !settings.shortcuts[
+          event.key.toLowerCase() === "r" ? "replace" : "find"
+        ]
+          ? event.key.toLowerCase() === "r"
+            ? "replace"
+            : "find"
+          : undefined);
+      if (!entry) return;
       if (
-        (doc?.docx || (doc?.spreadsheet && doc.spreadsheetMode !== "source")) &&
-        matchesBinding(event, settings.shortcuts.save || "Mod-s")
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        void save();
+        isEditorTextControl(event.target) &&
+        !(
+          entry === "save" &&
+          event.target instanceof Element &&
+          event.target.closest(".islet-editor,.docx-editor,.spreadsheet-editor")
+        ) &&
+        !(
+          ["find", "replace", "findNext", "findPrevious"].includes(entry) &&
+          event.target instanceof Element &&
+          event.target.closest(".file-search-dock")
+        )
+      )
         return;
+      // Plain Tab and line-edit commands belong only to a focused code editor.
+      if (
+        [
+          "indent",
+          "outdent",
+          "comment",
+          "duplicateLine",
+          "deleteLine",
+          "moveLineUp",
+          "moveLineDown",
+          "goToLine",
+          "complete",
+          "expandSelection",
+          "fold",
+          "unfold",
+          "foldAll",
+          "unfoldAll",
+        ].includes(entry) &&
+        !editor.current?.view?.hasFocus
+      )
+        return;
+      if (
+        ["copy", "cut", "paste", "select-all", "undo", "redo"].includes(
+          entry,
+        ) &&
+        !(
+          editor.current?.view?.hasFocus ||
+          doc?.docx ||
+          doc?.spreadsheet ||
+          (event.target instanceof Element && event.target.closest(".tree"))
+        )
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      command(entry);
+    };
+    const release = (event: KeyboardEvent) => {
+      if (["Control", "Meta", "Alt"].includes(event.key)) {
+        switchOrder.current = null;
+        setSwitcher([]);
       }
-      for (const [id, binding] of Object.entries(settings.shortcuts || {})) {
-        if (binding && matchesBinding(event, binding)) {
-          event.preventDefault();
-          event.stopPropagation();
-          command(id);
-          return;
-        }
-      }
+    };
+    const dismiss = () => {
+      switchOrder.current = null;
+      setSwitcher([]);
     };
     window.addEventListener("keydown", custom, true);
-    return () => window.removeEventListener("keydown", custom, true);
-  }, [settings.shortcuts, modal, doc, roots]);
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (e.key === "Escape") {
-        setMenu(null);
-        return;
-      }
-      if (modal) return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && !e.shiftKey && e.key.toLowerCase() === "n") {
-        e.preventDefault();
-        newEntry();
-      } else if (
-        mod &&
-        e.shiftKey &&
-        ["f", "r"].includes(e.key.toLowerCase())
-      ) {
-        e.preventDefault();
-        search(e.key.toLowerCase() === "r");
-      } else if (mod && e.key === "s") {
-        e.preventDefault();
-        void save();
-      } else if (mod && e.key === "b") {
-        e.preventDefault();
-        void definition();
-      } else if (e.shiftKey && e.key === "F6") {
-        e.preventDefault();
-        void beginRename();
-      } else if (e.altKey && e.key === "F7") {
-        e.preventDefault();
-        void definition(true);
-      } else if (mod && e.key === "[") {
-        e.preventDefault();
-        back();
-      } else if (mod && e.key === "]") {
-        e.preventDefault();
-        forward();
-      } else if (
-        e.altKey &&
-        e.shiftKey &&
-        ["ArrowUp", "ArrowDown"].includes(e.key)
-      ) {
-        e.preventDefault();
-        bookmarkJump(e.key === "ArrowDown" ? 1 : -1);
-      } else if (e.key === "F11") {
-        e.preventDefault();
-        e.shiftKey ? setModal("bookmarks") : bookmark();
-      } else if (mod && e.shiftKey && e.key.toLowerCase() === "t") {
-        e.preventDefault();
-        const id = [...documents.documents.keys()]
-          .reverse()
-          .find((id) => !tabs.includes(id));
-        if (id) {
-          setTabs([...tabs, id]);
-          setActive(id);
-        }
-      } else if (mod && e.key === "w") {
-        e.preventDefault();
-        if (active) close(active);
-      }
+    window.addEventListener("keyup", release, true);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("pointerdown", dismiss);
+    return () => {
+      window.removeEventListener("keydown", custom, true);
+      window.removeEventListener("keyup", release, true);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("pointerdown", dismiss);
     };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [doc, tabs, roots, modal, position]);
+  }, [
+    settings.shortcuts,
+    settings.keymap,
+    modal,
+    doc,
+    roots,
+    tabs,
+    active,
+    position,
+  ]);
   useEffect(() => {
     if (!menu) return;
     document
@@ -1537,7 +1636,7 @@ export default function App() {
   }, [menu]);
   useNativeMenu(
     (id) => {
-      if (updates.frozenRef.current) return;
+      if (updates.frozenRef.current || modal) return;
       if (id === "checkUpdates") {
         updates.check();
         return;
@@ -1566,7 +1665,12 @@ export default function App() {
       }
       command(id);
     },
-    settings.shortcuts,
+    Object.fromEntries(
+      Object.keys(shortcuts).map((id) => [
+        id,
+        bindingFor(id, settings.shortcuts, settings.keymap) || "-",
+      ]),
+    ),
     ready,
     !!doc?.readonly,
   );
@@ -1577,6 +1681,23 @@ export default function App() {
       className={`app ${dark ? "dark" : "light"} ${settings.compact ? "compact" : ""}`}
       style={{ "--ui-scale": settings.uiScale } as React.CSSProperties}
     >
+      {switcher.length > 0 && (
+        <div
+          className="tab-switcher"
+          role="listbox"
+          aria-label="Recent editors"
+        >
+          {switcher.map((id) => (
+            <div key={id} role="option" aria-selected={id === active}>
+              <FileIcon path={documents.documents.get(id)?.path || ""} />
+              <span>
+                {base(documents.documents.get(id)?.path || "")}
+                <small>{documents.documents.get(id)?.path}</small>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region>
           Islet
@@ -2249,6 +2370,10 @@ export default function App() {
                       doc.preview = false;
                     }}
                     onNavigate={(found) => {
+                      if (!found.length) {
+                        editor.current?.notice("No reference found");
+                        return;
+                      }
                       if (found.length === 1) void navigate(found[0]);
                       else {
                         setLocations(found);
@@ -2389,6 +2514,7 @@ export default function App() {
             <button
               key={i}
               role="menuitem"
+              aria-label={item.label}
               className={item.separator ? "separator" : ""}
               disabled={!!item.disabled}
               title={item.disabled}
@@ -2399,11 +2525,14 @@ export default function App() {
             >
               <span>{item.label}</span>
               <small>
-                {settings.shortcuts[
-                  Object.keys(shortcuts).find(
+                {(() => {
+                  const id = Object.keys(shortcuts).find(
                     (id) => shortcuts[id].label === item.label,
-                  ) || ""
-                ] || item.hint}
+                  );
+                  return id
+                    ? bindingFor(id, settings.shortcuts, settings.keymap)
+                    : item.hint;
+                })()}
               </small>
             </button>
           ))}
@@ -2675,9 +2804,28 @@ export default function App() {
           </div>
         </Modal>
       )}
+      {modal === "keymap" && (
+        <Modal title="Keyboard shortcuts" wide onClose={() => setModal(null)}>
+          <div className="dialog-body">
+            <KeymapSettings value={settings} onChange={setSettings} />
+            <footer>
+              <button type="button" onClick={() => setModal("settings")}>
+                Back to Settings
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
       {modal === "settings" && (
         <Modal title="Settings" onClose={() => setModal(null)}>
           <div className="dialog-body settings">
+            <button
+              type="button"
+              className="settings-keymap-link"
+              onClick={() => setModal("keymap")}
+            >
+              Keyboard shortcuts…
+            </button>
             <label>
               Appearance
               <select
@@ -2870,39 +3018,7 @@ export default function App() {
               onError={fail}
               onManage={() => setModal("codespaces")}
             />
-            <details className="shortcut-settings">
-              <summary>Keyboard shortcuts</summary>
-              <p className="muted">
-                Use Mod for Command on macOS or Control elsewhere, for example
-                Mod-Shift-f. Empty restores the default.
-              </p>
-              {Object.entries(shortcuts).map(([id, shortcut]) => (
-                <label key={id}>
-                  {shortcut.label}
-                  <input
-                    value={settings.shortcuts[id] || ""}
-                    placeholder={shortcut.binding}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      const duplicate = Object.entries(settings.shortcuts).find(
-                        ([other, binding]) =>
-                          other !== id && value && binding === value,
-                      );
-                      if (duplicate) {
-                        fail(
-                          `Shortcut already used by ${shortcuts[duplicate[0]]?.label || duplicate[0]}`,
-                        );
-                        return;
-                      }
-                      setSettings({
-                        ...settings,
-                        shortcuts: { ...settings.shortcuts, [id]: value },
-                      });
-                    }}
-                  />
-                </label>
-              ))}
-            </details>
+
             <p className="muted">
               Inter and JetBrains Mono are bundled. Optional integrations are
               managed in Plugins.

@@ -1,11 +1,16 @@
 import { useEffect, useRef } from "react";
-import { shortcuts } from "../settings/shortcuts";
+import {
+  shortcuts,
+  bindingFor,
+  nativeAccelerator,
+} from "../settings/shortcuts";
 export function useNativeMenu(
   onCommand: (command: string) => void,
   bindings: Record<string, string>,
   enabled: boolean,
   readonly = false,
 ) {
+  const bindingIdentity = JSON.stringify(bindings);
   const action = useRef(onCommand);
   action.current = onCommand;
   useEffect(() => {
@@ -25,19 +30,18 @@ export function useNativeMenu(
         action: () => action.current(id),
       });
       const commandItem = (id: string) => {
-        const binding = bindings[id] || shortcuts[id]?.binding;
-        return item(
-          id,
-          shortcuts[id]?.label || id,
-          binding?.replace(/^Mod-/, "CmdOrCtrl-").split("-").join("+"),
-        );
+        const binding =
+          bindings[id] === "-"
+            ? undefined
+            : (bindings[id] || bindingFor(id)).split(";")[0].trim();
+        return item(id, shortcuts[id]?.label || id, nativeAccelerator(binding));
       };
       const menu = await Menu.new({
         items: [
           {
             text: "Islet",
             items: [
-              item("settings", "Settings…", "CmdOrCtrl+Comma"),
+              commandItem("settings"),
               item("checkUpdates", "Check for Updates…"),
               { item: "Separator" },
               item("closeWindow", "Close Workspace", "CmdOrCtrl+Shift+W"),
@@ -49,24 +53,24 @@ export function useNativeMenu(
               commandItem("newFile"),
               item("newFolder", "New Folder…"),
               { item: "Separator" },
-              item("openFile", "Open File…", "CmdOrCtrl+O"),
+              commandItem("openFile"),
               item("openFolder", "Open Folder…"),
               item("addSSH", "Add SSH Folder…"),
               { item: "Separator" },
               commandItem("save"),
-              item("closeTab", "Close Tab", "CmdOrCtrl+W"),
+              commandItem("closeTab"),
             ],
           },
           {
             text: "Edit",
             items: [
-              item("undo", "Undo", "CmdOrCtrl+Z"),
-              item("redo", "Redo", "CmdOrCtrl+Shift+Z"),
+              { item: "Undo" },
+              { item: "Redo" },
               { item: "Separator" },
-              item("cut", "Cut", "CmdOrCtrl+X"),
-              item("copy", "Copy", "CmdOrCtrl+C"),
-              item("paste", "Paste", "CmdOrCtrl+V"),
-              item("select-all", "Select All", "CmdOrCtrl+A"),
+              { item: "Cut" },
+              { item: "Copy" },
+              { item: "Paste" },
+              { item: "SelectAll" },
               { item: "Separator" },
               commandItem("rename"),
             ],
@@ -87,8 +91,8 @@ export function useNativeMenu(
           {
             text: "Search",
             items: [
-              item("find", "Find in File…", "CmdOrCtrl+F"),
-              item("replace", "Replace in File…", "CmdOrCtrl+R"),
+              commandItem("find"),
+              commandItem("replace"),
               { item: "Separator" },
               commandItem("findFiles"),
               commandItem("replaceFiles"),
@@ -115,5 +119,5 @@ export function useNativeMenu(
       closeFocus?.();
       void resource?.close();
     };
-  }, [bindings, enabled, readonly]);
+  }, [bindingIdentity, enabled, readonly]);
 }

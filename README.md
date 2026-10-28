@@ -95,6 +95,14 @@ For XLS/XLSX, **+ Sheet** creates a worksheet and **Sheet actions…** offers re
 To qualify the native spreadsheet path, build a debug executable with bundled assets (`tauri build --debug --no-bundle`), stop the development server, then run `npm run test:native:spreadsheets`. The runner uses disposable files and application data, a debug-only DOM/IPC hook, and a 45-second process expiry. It does not replace physical keyboard, clipboard or IME testing.
 
 
+## Keyboard shortcuts, search and hover
+
+**Settings → Keyboard shortcuts** provides 49 configurable actions with JetBrains-style macOS and Windows/Linux presets, an automatic system preset, action filtering, keystroke recording, resets and conflict warnings. Typed mappings apply on blur or Enter; `;` separates alternatives and `-` disables an application mapping. Ctrl+Tab / Ctrl+Shift+Tab cycle recent editors; next/previous tabs use Cmd+Shift+]/[ on macOS and Alt+Right/Left on Windows/Linux. OS-reserved shortcuts such as Alt+Tab may not reach the app. Native clipboard commands retain normal system behavior in dialog inputs.
+
+Find and Replace within a file open a bottom dock with match counts, navigation and optional replacement controls. Text files additionally support Match case, Whole words and Regular expression options. Search-dialog clipboard shortcuts act on the focused input rather than the editor buffer.
+
+Language hovers render sanitized Markdown and highlighted code, decode documentation entities and contain long documentation in a scrollable viewport. When a type is unresolved, Islet checks a real in-project definition through the language service; it never invents a type. Types that remain unresolved show an interpreter/import hint. Empty definition/reference jumps show an anchored “No reference found” tooltip without opening a modal.
+
 ## DOCX and file operations
 
 Use **Cmd/Ctrl+F** to find text in a DOCX, or **Cmd/Ctrl+R** to open Find and Replace. The document view bar also has Find and Replace buttons. Search highlights matches, shows the current match count, and supports Match case, previous/next buttons, Enter/Shift+Enter navigation and Escape to close. Replace changes the active match; Replace all changes all editable matches in one undoable operation. Replacements use ordinary unsaved edits, save and recovery; searching alone does not modify the file. Everything runs locally, and read-only documents allow Find only.

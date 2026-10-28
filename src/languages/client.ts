@@ -165,6 +165,7 @@ export class LanguageManager {
           typeCheckingMode: "basic",
           diagnosticMode: "openFilesOnly",
           autoSearchPaths: true,
+          useLibraryCodeForTypes: true,
           extraPaths: projectPaths,
         },
       },
@@ -173,6 +174,7 @@ export class LanguageManager {
           typeCheckingMode: "basic",
           diagnosticMode: "openFilesOnly",
           autoSearchPaths: true,
+          useLibraryCodeForTypes: true,
           extraPaths: projectPaths,
         },
       },
@@ -315,27 +317,7 @@ export class LanguageManager {
             jsonrpc: "2.0",
             method: "workspace/didChangeConfiguration",
             params: {
-              settings: {
-                python: {
-                  pythonPath: current.root.interpreter,
-                  analysis: {
-                    typeCheckingMode: "basic",
-                    diagnosticMode: "openFilesOnly",
-                  },
-                },
-                basedpyright: {
-                  analysis: {
-                    typeCheckingMode: "basic",
-                    diagnosticMode: "openFilesOnly",
-                  },
-                },
-                typescript: {
-                  preferences: { includePackageJsonAutoImports: "on" },
-                },
-                javascript: {
-                  preferences: { includePackageJsonAutoImports: "on" },
-                },
-              },
+              settings: this.configuration(current),
             },
           });
           current.status = "ready";
@@ -426,11 +408,58 @@ export class LanguageManager {
       throw new Error("Language result is stale; try again");
     return result;
   }
+  async hover(doc: DocumentModel, offset: number) {
+    const version = doc.version;
+    const value = await this.request(doc, "textDocument/hover", offset);
+    if (!value) return value;
+    const text = (contents: any): string =>
+      Array.isArray(contents)
+        ? contents.map(text).join("\n")
+        : typeof contents === "string"
+          ? contents
+          : contents?.value || "";
+    const unresolved = (contents: any) =>
+      /\b(?:Unknown|unknown)\b/.test(
+        text(contents)
+          .split(/```[\w]*\n/)
+          .slice(0, 2)
+          .join("\n"),
+      );
+    if (!unresolved(value.contents)) return value;
+    // Ask the language service at an actual definition, never invent a type
+    // from identifier names or text patterns. Keep original hover coordinates.
+    try {
+      const locations = await this.locations(
+        doc,
+        "textDocument/definition",
+        offset,
+      );
+      for (const target of locations.slice(0, 2)) {
+        if (!ownerOf(this.roots, target.hostId, target.path) || !this.documents)
+          continue;
+        const source = await this.documents.open(target.hostId, target.path);
+        const better = await this.request(
+          source,
+          "textDocument/hover",
+          target.range.start,
+        );
+        if (doc.version !== version)
+          throw new Error("Language result is stale; try again");
+        if (better?.contents && !unresolved(better.contents))
+          return { ...value, contents: better.contents };
+      }
+    } catch (error) {
+      if (doc.version !== version) throw error;
+    }
+    return { ...value, unresolvedType: true };
+  }
   async locations(
     doc: DocumentModel,
     method: string,
     offset: number,
   ): Promise<LanguageLocation[]> {
+    if (!languageFor(doc.path) || !ownerOf(this.roots, doc.hostId, doc.path))
+      return [];
     const value = await this.request(
       doc,
       method,

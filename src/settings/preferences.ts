@@ -3,6 +3,7 @@ export interface TerminalPreference {
   path: string;
 }
 export interface Preferences {
+  keymap: "auto" | "mac" | "windows";
   schemaVersion: 1;
   theme: "dark" | "light" | "system";
   fontSize: number;
@@ -21,6 +22,7 @@ export interface Preferences {
 }
 export const defaults: Preferences = {
   schemaVersion: 1,
+  keymap: "auto",
   theme: "dark",
   fontSize: 13,
   fontFamily: "JetBrains Mono",
@@ -40,6 +42,18 @@ export function validatePreferences(value: Partial<Preferences>): Preferences {
   return {
     ...defaults,
     ...value,
+    keymap:
+      value.keymap === "mac" || value.keymap === "windows"
+        ? value.keymap
+        : "auto",
+    shortcuts:
+      value.shortcuts && typeof value.shortcuts === "object"
+        ? Object.fromEntries(
+            Object.entries(value.shortcuts).filter(
+              ([, binding]) => typeof binding === "string",
+            ),
+          )
+        : {},
     callerPanel: value.callerPanel === true,
     folderOpenMode: value.folderOpenMode === "single" ? "single" : "double",
     fontSize: Math.max(9, Math.min(32, Number(value.fontSize) || 13)),

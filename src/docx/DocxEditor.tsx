@@ -88,6 +88,18 @@ export default forwardRef<
         return;
       }
       const editor = instance.current?.activeEditor;
+      if (command === "findNext" || command === "findPrevious") {
+        if (!search) {
+          openSearch();
+          return;
+        }
+        (
+          editor?.commands?.[
+            command === "findNext" ? "nextSearchMatch" : "previousSearchMatch"
+          ] as (() => unknown) | undefined
+        )?.();
+        return;
+      }
       if (command === "undo" || command === "redo") {
         if (editor?.commands?.[command])
           (editor.commands[command] as () => unknown)();
@@ -234,6 +246,12 @@ export default forwardRef<
         id={ids.current + "-toolbar"}
         ref={toolbar}
       />
+
+      {error && (
+        <p role="alert">Could not open or export this document: {error}</p>
+      )}
+      {!ready && !error && <p className="docx-loading">Opening document…</p>}
+      <div className="docx-canvas" id={ids.current} ref={host} />
       {ready && search && instance.current?.activeEditor && (
         <DocumentSearch
           editor={instance.current.activeEditor}
@@ -242,11 +260,6 @@ export default forwardRef<
           onClose={() => setSearch(null)}
         />
       )}
-      {error && (
-        <p role="alert">Could not open or export this document: {error}</p>
-      )}
-      {!ready && !error && <p className="docx-loading">Opening document…</p>}
-      <div className="docx-canvas" id={ids.current} ref={host} />
       <div
         className="docx-viewbar"
         role="group"

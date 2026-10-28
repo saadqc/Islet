@@ -26,7 +26,7 @@ export function Modal({
       if (e.key === "Tab" && ref.current) {
         const list = Array.from(
           ref.current.querySelectorAll<HTMLElement>(
-            'button:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex="0"]',
+            'button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]',
           ),
         );
         if (!list.length) return;
@@ -40,8 +40,25 @@ export function Modal({
         }
       }
     };
+    const editing = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof Element &&
+        e.target.closest('[data-recording="true"]')
+      )
+        return;
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        ["a", "c", "x", "v", "z", "y"].includes(e.key.toLowerCase())
+      )
+        e.stopPropagation();
+    };
+    // Preserve the browser/native edit operation, but keep document/grid
+    // listeners from consuming a focused dialog's keyboard events.
+    window.addEventListener("keydown", editing, true);
     document.addEventListener("keydown", handler, true);
     return () => {
+      window.removeEventListener("keydown", editing, true);
       document.removeEventListener("keydown", handler, true);
       prior?.focus();
     };

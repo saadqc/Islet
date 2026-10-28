@@ -29,6 +29,7 @@ export default function DocumentSearch({
 }) {
   const input = useRef<HTMLInputElement>(null);
   const panel = useRef<HTMLDivElement>(null);
+  const [showReplace, setShowReplace] = useState(request.replace);
   const [query, setQuery] = useState("");
   const [replacement, setReplacement] = useState("");
   const [matchCase, setMatchCase] = useState(false);
@@ -64,6 +65,7 @@ export default function DocumentSearch({
     editor.focus();
   }
   useEffect(() => {
+    setShowReplace(request.replace);
     input.current?.focus({ preventScroll: true });
     input.current?.select();
   }, [request.sequence]);
@@ -97,7 +99,7 @@ export default function DocumentSearch({
   }, [editor]);
   return (
     <div
-      className="docx-search"
+      className="docx-search file-search-dock"
       role="search"
       aria-label="Find in document"
       ref={panel}
@@ -109,7 +111,28 @@ export default function DocumentSearch({
         }
       }}
     >
-      <div className="docx-search-row">
+      <div className="search-dock-heading">
+        <strong>Find in document</strong>
+        {!readonly && (
+          <button
+            type="button"
+            aria-label="Toggle document replacement"
+            aria-pressed={showReplace}
+            onClick={() => setShowReplace((v) => !v)}
+          >
+            Replace
+          </button>
+        )}
+        <button
+          className="search-dock-close"
+          type="button"
+          aria-label="Close document search"
+          onClick={close}
+        >
+          ×
+        </button>
+      </div>
+      <div className="docx-search-row search-dock-row">
         <input
           ref={input}
           aria-label="Find in document"
@@ -157,16 +180,9 @@ export default function DocumentSearch({
           />{" "}
           Match case
         </label>
-        <button
-          type="button"
-          aria-label="Close document search"
-          onClick={close}
-        >
-          ×
-        </button>
       </div>
-      {request.replace && !readonly && (
-        <div className="docx-search-row">
+      {showReplace && !readonly && (
+        <div className="docx-search-row search-dock-row">
           <input
             aria-label="Replace with"
             placeholder="Replace with"

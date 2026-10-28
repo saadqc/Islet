@@ -1,3 +1,5 @@
+import { fileSearch, replaceMode } from "./SearchDock";
+import { renderHover } from "./hover";
 import { minimalEdits } from "../core/edits";
 import { expandSnippet } from "./snippets";
 import React, {
@@ -31,6 +33,7 @@ import {
   gutter,
   GutterMarker,
   hoverTooltip,
+  showTooltip,
   type DecorationSet,
 } from "@codemirror/view";
 import {
@@ -45,11 +48,20 @@ import {
   selectAll,
   indentMore,
   indentLess,
+  copyLineDown,
+  deleteLine,
+  moveLineUp,
+  moveLineDown,
+  selectParentSyntax,
 } from "@codemirror/commands";
 import {
   bracketMatching,
   foldGutter,
   foldKeymap,
+  foldCode,
+  unfoldCode,
+  foldAll,
+  unfoldAll,
   indentOnInput,
   syntaxHighlighting,
   HighlightStyle,
@@ -57,6 +69,7 @@ import {
 } from "@codemirror/language";
 import {
   autocompletion,
+  startCompletion,
   completionKeymap,
   closeBrackets,
   closeBracketsKeymap,
@@ -66,6 +79,9 @@ import {
   searchKeymap,
   highlightSelectionMatches,
   openSearchPanel,
+  findNext,
+  findPrevious,
+  gotoLine,
 } from "@codemirror/search";
 import { setDiagnostics, lintGutter } from "@codemirror/lint";
 import { language } from "./languages";
@@ -104,6 +120,7 @@ export interface EditorProps {
 export interface EditorHandle {
   view: EditorView | null;
   focus: () => void;
+  notice: (message: string, offset?: number) => void;
   snapshot: () => LocationSnapshot | undefined;
   restore: (location: LocationSnapshot) => void;
   reveal: (location: LocationSnapshot) => void;
@@ -111,6 +128,35 @@ export interface EditorHandle {
   toggleBookmark: (offset?: number) => void;
   functionOffset: (direction: 1 | -1) => Promise<number | undefined>;
 }
+const noticeEffect = StateEffect.define<{
+  pos: number;
+  message: string;
+} | null>();
+const noticeField = StateField.define<{ pos: number; message: string } | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects)
+      if (effect.is(noticeEffect)) return effect.value;
+    return tr.docChanged ? null : value;
+  },
+  provide: (field) =>
+    showTooltip.compute([field], (state) => {
+      const notice = state.field(field);
+      return notice
+        ? {
+            pos: notice.pos,
+            above: true,
+            create: () => {
+              const dom = document.createElement("div");
+              dom.className = "islet-navigation-notice";
+              dom.setAttribute("role", "status");
+              dom.textContent = notice.message;
+              return { dom };
+            },
+          }
+        : null;
+    }),
+});
 const states = new Map<string, EditorState>();
 export function migrateEditorState(oldId: string, newId: string) {
   const state = states.get(oldId);
@@ -425,6 +471,25 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
       if (e?.name !== "AbortError" && !String(e).includes("stale"))
         propsRef.current.onError?.(e.message || String(e));
     };
+    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    const notice = (
+      message: string,
+      offset = viewRef.current?.state.selection.main.head || 0,
+    ) => {
+      const view = viewRef.current;
+      if (!view) return;
+      clearTimeout(noticeTimer);
+      view.dispatch({
+        effects: noticeEffect.of({
+          pos: Math.min(offset, view.state.doc.length),
+          message,
+        }),
+      });
+      noticeTimer = setTimeout(() => {
+        if (viewRef.current === view)
+          view.dispatch({ effects: noticeEffect.of(null) });
+      }, 3000);
+    };
     const runCommand = (id: string) => {
       const v = viewRef.current,
         p = propsRef.current;
@@ -439,6 +504,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
           "outdent",
           "undo",
           "redo",
+          "duplicateLine",
+          "deleteLine",
+          "moveLineUp",
+          "moveLineDown",
         ].includes(id)
       ) {
         p.onError?.("This document is read-only");
@@ -447,8 +516,31 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
       if (id === "undo") undo(v);
       else if (id === "redo") redo(v);
       else if (id === "select-all") selectAll(v);
-      else if (id === "find" || id === "replace") openSearchPanel(v);
-      else if (id === "comment") toggleComment(v);
+      else if (id === "find" || id === "replace") {
+        v.dispatch({ effects: replaceMode.of(id === "replace") });
+        openSearchPanel(v);
+        v.dom.querySelector<HTMLInputElement>("[main-field]")?.focus();
+        return;
+      } else if (id === "findNext") {
+        findNext(v);
+        return;
+      } else if (id === "findPrevious") {
+        findPrevious(v);
+        return;
+      } else if (id === "duplicateLine") copyLineDown(v);
+      else if (id === "deleteLine") deleteLine(v);
+      else if (id === "moveLineUp") moveLineUp(v);
+      else if (id === "moveLineDown") moveLineDown(v);
+      else if (id === "complete") startCompletion(v);
+      else if (id === "expandSelection") selectParentSyntax(v);
+      else if (id === "fold") foldCode(v);
+      else if (id === "unfold") unfoldCode(v);
+      else if (id === "foldAll") foldAll(v);
+      else if (id === "unfoldAll") unfoldAll(v);
+      else if (id === "goToLine") {
+        gotoLine(v);
+        return;
+      } else if (id === "comment") toggleComment(v);
       else if (id === "indent") indentMore(v);
       else if (id === "outdent") indentLess(v);
       else if (id === "bookmark") {
@@ -528,6 +620,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         return viewRef.current;
       },
       focus: () => viewRef.current?.focus(),
+      notice,
       snapshot,
       restore,
       reveal,
@@ -703,6 +796,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         doc: props.document.text,
         extensions: [
           history(),
+          fileSearch,
+          noticeField,
           drawSelection(),
           scrollPastEnd(),
           dropCursor(),
@@ -749,21 +844,28 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
             const p = propsRef.current;
             if (!p.languages || view.composing) return null;
             try {
-              const value = await p.languages.request(
-                docRef.current,
-                "textDocument/hover",
-                pos,
-              );
-              if (!value) return null;
+              const current = docRef.current,
+                version = current.version;
+              const value = await p.languages.hover(current, pos);
+              if (
+                !value ||
+                viewRef.current !== view ||
+                docRef.current !== current ||
+                current.version !== version
+              )
+                return null;
               return {
-                pos,
-                end: pos,
+                pos: value.range
+                  ? offsetAt(current.text, value.range.start)
+                  : pos,
+                end: value.range
+                  ? offsetAt(current.text, value.range.end)
+                  : pos,
                 above: true,
                 create: () => {
-                  const dom = document.createElement("div");
-                  dom.className = "islet-lsp-tip";
-                  dom.textContent = plain(value.contents);
-                  return { dom };
+                  return {
+                    dom: renderHover(value.contents, value.unresolvedType),
+                  };
                 },
               };
             } catch {
@@ -771,104 +873,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
             }
           }),
           keymap.of([
-            {
-              key: "Alt-Shift-ArrowUp",
-              run: () => {
-                propsRef.current.onCommand?.("previousBookmark");
-                return true;
-              },
-            },
-            {
-              key: "Alt-Shift-ArrowDown",
-              run: () => {
-                propsRef.current.onCommand?.("nextBookmark");
-                return true;
-              },
-            },
-            {
-              key: "Mod-s",
-              run: () => {
-                propsRef.current.onCommand?.("save");
-                return true;
-              },
-            },
-            {
-              key: "Mod-b",
-              run: () => {
-                propsRef.current.onCommand?.("definition");
-                return true;
-              },
-            },
-            {
-              key: "Alt-F7",
-              run: () => {
-                propsRef.current.onCommand?.("references");
-                return true;
-              },
-            },
-            {
-              key: "Shift-F6",
-              run: () => {
-                propsRef.current.onCommand?.("rename");
-                return true;
-              },
-            },
-            {
-              key: "Mod-F11",
-              run: () => {
-                runCommand("bookmark");
-                return true;
-              },
-            },
-            {
-              key: "Mod-Shift-F11",
-              run: () => {
-                propsRef.current.onCommand?.("bookmarks");
-                return true;
-              },
-            },
-            {
-              key: "Mod-[",
-              run: () => {
-                propsRef.current.onCommand?.("back");
-                return true;
-              },
-            },
-            {
-              key: "Mod-]",
-              run: () => {
-                propsRef.current.onCommand?.("forward");
-                return true;
-              },
-            },
-            {
-              key: "Ctrl-Alt-ArrowUp",
-              run: () => {
-                propsRef.current.onCommand?.("previous-function");
-                return true;
-              },
-            },
-            {
-              key: "Ctrl-Alt-ArrowDown",
-              run: () => {
-                propsRef.current.onCommand?.("next-function");
-                return true;
-              },
-            },
-            {
-              key: "Mod-Shift-f",
-              run: () => {
-                propsRef.current.onCommand?.("find-files");
-                return true;
-              },
-            },
-            {
-              key: "Mod-Shift-r",
-              run: () => {
-                propsRef.current.onCommand?.("replace-files");
-                return true;
-              },
-            },
             {
               key: "Shift-F10",
               run: (view) => {
@@ -885,7 +889,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
             ...closeBracketsKeymap,
             ...defaultKeymap,
             ...historyKeymap,
-            ...searchKeymap,
+            ...searchKeymap.filter(
+              (binding) =>
+                !["Mod-f", "Mod-g", "Mod-Shift-g", "Mod-Alt-g"].includes(
+                  binding.key || "",
+                ),
+            ),
             ...foldKeymap,
             ...completionKeymap,
           ]),
@@ -951,11 +960,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
               return true;
             },
             mousedown(event, view) {
-              if (
-                (event.metaKey || event.ctrlKey) &&
-                event.button === 0 &&
-                propsRef.current.languages
-              ) {
+              if ((event.metaKey || event.ctrlKey) && event.button === 0) {
                 const offset = view.posAtCoords({
                   x: event.clientX,
                   y: event.clientY,
@@ -964,9 +969,21 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
                   event.preventDefault();
                   view.focus();
                   view.dispatch({ selection: EditorSelection.cursor(offset) });
+                  if (!propsRef.current.languages) {
+                    notice("No reference found", offset);
+                    return true;
+                  }
                   void propsRef.current.languages
                     .definition(docRef.current, offset)
-                    .then((result) => propsRef.current.onNavigate?.(result))
+                    .then((result) => {
+                      if (
+                        viewRef.current !== view ||
+                        docRef.current.id !== propsRef.current.document.id
+                      )
+                        return;
+                      if (!result.length) notice("No reference found", offset);
+                      else propsRef.current.onNavigate?.(result);
+                    })
                     .catch(error);
                   return true;
                 }
@@ -1048,6 +1065,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         parent: container.current,
       });
       viewRef.current = view;
+      view.focus();
       const modifierKey = (event: KeyboardEvent) => modifierHover(view, event);
       const clearModifier = () => {
         modifierPointers.delete(view);
@@ -1085,6 +1103,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         );
       });
       return () => {
+        clearTimeout(noticeTimer);
         states.set(docRef.current.id, view.state);
         propsRef.current.document.location = snapshot();
         unsubscribe?.();
