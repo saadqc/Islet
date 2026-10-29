@@ -1,9 +1,12 @@
 .update-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   border-top: 1px solid var(--border);
   padding-top: 16px;
 }
 .update-settings h3 {
-  margin: 0 0 8px;
+  margin: 0;
 }
 .update-actions {
   display: flex;

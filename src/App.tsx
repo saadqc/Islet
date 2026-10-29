@@ -39,6 +39,7 @@ import { NavigationHistory } from "./navigation/history";
 import { BookmarkStore } from "./navigation/bookmarks";
 import { Editor, migrateEditorState, type EditorHandle } from "./editor/Editor";
 import { ProjectTree } from "./shell/ProjectTree";
+import { RemoteHelperSetup } from "./shell/RemoteHelperSetup";
 import { Modal } from "./shell/Modal";
 import { useNativeMenu } from "./shell/NativeMenu";
 import { AddFolderDialog } from "./shell/AddFolderDialog";
@@ -64,6 +65,7 @@ import {
   matchesBinding,
   bindingFor,
   isEditorTextControl,
+  isMac,
 } from "./settings/shortcuts";
 import { KeymapSettings } from "./settings/KeymapSettings";
 import { base, type Root, parseLocation } from "./workspaces/model";
@@ -164,6 +166,7 @@ export default function App() {
   const dropFiles = useRef<(paths: string[]) => Promise<void>>(async () => {});
   const recoveryKey = useRef("recovery:" + crypto.randomUUID());
   const handledRequests = useRef(new Set<string>());
+  const [setupHost, setSetupHost] = useState("");
   const remoteReconnects = useRef(new Map<string, Promise<void>>());
   const [referenceIndex, setReferenceIndex] = useState(-1);
   const recentTabs = useRef<string[]>([]);
@@ -701,7 +704,10 @@ export default function App() {
             root.hostId === hostId
               ? {
                   ...root,
-                  state: "disconnected",
+                  state:
+                    (error as any)?.code === "REMOTE_SETUP_REQUIRED"
+                      ? "setup-needed"
+                      : "disconnected",
                   connectionError:
                     error instanceof Error ? error.message : String(error),
                 }
@@ -1655,6 +1661,21 @@ export default function App() {
           : undefined);
       if (!entry) return;
       if (
+        ["copy", "cut", "paste"].includes(entry) &&
+        event.key.toLowerCase() ===
+          ({ copy: "c", cut: "x", paste: "v" } as Record<string, string>)[
+            entry
+          ] &&
+        (isMac()
+          ? event.metaKey && !event.ctrlKey
+          : event.ctrlKey && !event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.target instanceof Element &&
+        event.target.closest(".cm-content,.ProseMirror")
+      )
+        return; // Native clipboard events carry text without an async web permission request.
+      if (
         isEditorTextControl(event.target) &&
         !(
           entry === "save" &&
@@ -2059,6 +2080,10 @@ export default function App() {
               }
               onOpen={(h, p) => void open(h, p, false)}
               onReconnect={(hostId) => reconnectHost(hostId, true)}
+              onSetup={(hostId) => {
+                setSetupHost(hostId);
+                setModal("remote-helper");
+              }}
               onMenu={(e, root, path, folder) =>
                 setMenu({
                   x: e.clientX,
@@ -2111,6 +2136,17 @@ export default function App() {
                                 ? "Local folder"
                                 : undefined,
                           },
+                          ...(root.hostId.startsWith("ssh:")
+                            ? [
+                                {
+                                  label: "Set Up / Upgrade SSH Helper…",
+                                  action: () => {
+                                    setSetupHost(root.hostId);
+                                    setModal("remote-helper");
+                                  },
+                                },
+                              ]
+                            : []),
                           {
                             label: "Remove Root from Workspace",
                             action: () => {
@@ -3132,7 +3168,7 @@ export default function App() {
                 Soft wrap
               </label>
             </div>
-            <label className="check">
+            <label className="check-label">
               <input
                 type="checkbox"
                 checked={settings.callerPanel}
@@ -3245,6 +3281,18 @@ export default function App() {
           onClose={() => setModal(null)}
           onAdd={addRoot}
           onError={fail}
+        />
+      )}
+      {modal === "remote-helper" && (
+        <RemoteHelperSetup
+          key={setupHost}
+          hostId={setupHost}
+          onClose={() =>
+            setModal((current) =>
+              current === "remote-helper" ? null : current,
+            )
+          }
+          onInstalled={() => reconnectHost(setupHost, true)}
         />
       )}
       {modal === "close-window" && (

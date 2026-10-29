@@ -24,6 +24,7 @@ function Node({
   onPaste,
   dropTarget,
   onReconnect,
+  onSetup,
 }: {
   root: Root;
   path: string;
@@ -43,6 +44,7 @@ function Node({
   onPaste?: (target: FileItem) => void;
   dropTarget?: FileItem;
   onReconnect?: (hostId: string) => Promise<void>;
+  onSetup?: (hostId: string) => void;
   folderOpenMode: "single" | "double";
   onSelect: (root: Root, path: string, folder: boolean) => void;
 }) {
@@ -237,13 +239,25 @@ function Node({
             <div className="tree-error" role="status">
               <span>{problem}</span>
               <button
-                onClick={() => void retry()}
+                onClick={() =>
+                  root.state === "setup-needed" && onSetup
+                    ? onSetup(root.hostId)
+                    : void retry()
+                }
                 aria-label={
-                  root.hostId === "local" ? "Retry folder" : "Reconnect SSH"
+                  root.state === "setup-needed"
+                    ? "Set Up SSH Helper"
+                    : root.hostId === "local"
+                      ? "Retry folder"
+                      : "Reconnect SSH"
                 }
               >
                 <RefreshCw size={12} />{" "}
-                {root.hostId === "local" ? "Retry" : "Reconnect"}
+                {root.state === "setup-needed"
+                  ? "Set Up SSH Helper"
+                  : root.hostId === "local"
+                    ? "Retry"
+                    : "Reconnect"}
               </button>
             </div>
           ) : (
@@ -282,6 +296,7 @@ function Node({
                   onPaste={onPaste}
                   dropTarget={dropTarget}
                   onReconnect={onReconnect}
+                  onSetup={onSetup}
                 />
               ))
           )}
@@ -302,6 +317,7 @@ export function ProjectTree({
   onPaste,
   dropTarget,
   onReconnect,
+  onSetup,
 }: {
   roots: Root[];
   onOpen: (host: string, path: string, preview?: boolean) => void;
@@ -318,6 +334,7 @@ export function ProjectTree({
   onPaste?: (target: FileItem) => void;
   dropTarget?: FileItem;
   onReconnect?: (hostId: string) => Promise<void>;
+  onSetup?: (hostId: string) => void;
   onSelect?: (root: Root, path: string, folder: boolean) => void;
 }) {
   return (
@@ -340,6 +357,7 @@ export function ProjectTree({
               onPaste={onPaste}
               dropTarget={dropTarget}
               onReconnect={onReconnect}
+              onSetup={onSetup}
             />
           </div>
         ))}

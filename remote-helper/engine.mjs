@@ -8,7 +8,7 @@ import { Worker } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const VERSION = "0.1.11";
+export const VERSION = "0.1.12";
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 const binaryWorkbook = (file) => /\.(?:xls|xlsx|docx)$/i.test(file);
 function workbookBytes(text) {

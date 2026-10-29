@@ -52,6 +52,8 @@ const snapshot = {
 };
 let connected = false,
   allowConnect = true,
+  helperMissing = false,
+  setupFails = false,
   unavailablePath,
   revision = "one",
   sessions = new Map();
@@ -108,6 +110,16 @@ async function prepare(page) {
       result = { enabled: false, savedForwards: [] };
     else if (operation === "remote.connect") {
       await new Promise((resolve) => setTimeout(resolve, 180));
+      if (helperMissing)
+        return route.fulfill({
+          json: {
+            error: {
+              code: "REMOTE_SETUP_REQUIRED",
+              message:
+                "The SSH helper for Islet 0.1.12 is not installed on fixture. Set up this version to reconnect.",
+            },
+          },
+        });
       if (!allowConnect)
         return route.fulfill({
           json: {
@@ -120,6 +132,28 @@ async function prepare(page) {
         });
       connected = true;
       result = { hostId, state: "ready", generation: "fixture" };
+    } else if (operation === "remote.probe") {
+      result = {
+        hostId,
+        target: "fixture",
+        version: "0.1.12",
+        cachePath: "/home/fixture/.cache/islet",
+        os: "Linux",
+        arch: "x86_64",
+        writable: true,
+        helperInstalled: !helperMissing,
+      };
+    } else if (operation === "remote.setup") {
+      assert.equal(payload.approve, true);
+      assert.equal(payload.hostId, hostId);
+      if (setupFails)
+        return route.fulfill({
+          json: {
+            error: { message: "Not enough remote free space for setup." },
+          },
+        });
+      helperMissing = false;
+      result = { hostId, state: "ready" };
     } else if (operation === "root.open") {
       assert.equal(connected, true, "Root reopened before SSH reconnected");
       if (payload.path === unavailablePath)
@@ -294,6 +328,53 @@ try {
     other.locator(".tree-name").getByText("notes.txt", { exact: true }),
   ).toHaveCount(2);
   assert.equal(connects(), beforeOpen + 1);
+  helperMissing = true;
+  connected = false;
+  attached.clear();
+  await emit(page, "disconnected", "SSH helper is unavailable.");
+  await page.getByRole("button", { name: "Reconnect SSH" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "Set Up SSH Helper" }),
+  ).toHaveCount(2);
+  const setups = () =>
+    calls.filter((call) => call.operation === "remote.setup").length;
+  assert.equal(
+    setups(),
+    0,
+    "Automatic reconnect cannot install a remote helper",
+  );
+  await page.getByRole("button", { name: "Set Up SSH Helper" }).first().click();
+  const setup = page.getByRole("dialog", { name: "Set Up SSH Helper" });
+  await expect(setup).toContainText("/home/fixture/.cache/islet/0.1.12");
+  await setup.getByRole("button", { name: "Cancel", exact: true }).click();
+  assert.equal(setups(), 0, "Closing setup must not install anything");
+  await page.getByRole("button", { name: "Set Up SSH Helper" }).first().click();
+  await expect(
+    setup.getByRole("button", { name: "Install and Reconnect", exact: true }),
+  ).toBeEnabled();
+  await page.screenshot({ path: path.join(evidence, "helper-setup.png") });
+  setupFails = true;
+  await setup
+    .getByRole("button", { name: "Install and Reconnect", exact: true })
+    .click();
+  await expect(setup.getByRole("alert")).toContainText(
+    "Not enough remote free space",
+  );
+  await expect(page.locator(".cm-content")).toContainText(
+    "UNSAVED LOCAL BUFFER",
+  );
+  setupFails = false;
+  await setup
+    .getByRole("button", { name: "Install and Reconnect", exact: true })
+    .click();
+  await expect(setup).toHaveCount(0);
+  await expect(page.locator(".tree-error")).toHaveCount(0);
+  await expect(
+    page.locator(".tree-name").getByText("notes.txt", { exact: true }),
+  ).toHaveCount(2);
+  await expect(page.locator(".cm-content")).toContainText(
+    "UNSAVED LOCAL BUFFER",
+  );
   assert.deepEqual(errors, []);
   console.log(
     "SSH reconnect UI passed: restore, retry, focus, shared transport, conflict and unsaved buffer preservation.",

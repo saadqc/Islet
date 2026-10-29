@@ -266,6 +266,9 @@ select:focus {
   align-items: center;
   gap: 5px;
 }
+.helper-location {
+  overflow-wrap: anywhere;
+}
 .tree-empty button {
   margin: 5px 0;
   width: 100%;
@@ -620,6 +623,7 @@ select {
   background: var(--surface);
 }
 input[type="checkbox"] {
+  flex-shrink: 0;
   width: 13px;
   height: 13px;
   min-height: 13px;

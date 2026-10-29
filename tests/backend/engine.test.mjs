@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
   Engine,
@@ -25,6 +27,7 @@ test("disconnect cancels an SSH startup waiting for authentication setup", async
     await fs.rm(dir, { recursive: true, force: true });
   });
   let release, entered;
+  host.probe = async () => ({ helperInstalled: true });
   const waiting = new Promise((resolve) => {
     entered = resolve;
   });
@@ -48,6 +51,71 @@ test("disconnect cancels an SSH startup waiting for authentication setup", async
   );
 });
 const temp = () => fs.mkdtemp(path.join(os.tmpdir(), "islet-backend-"));
+test("missing or incomplete versioned SSH runtimes require setup without installing or starting a channel", async (t) => {
+  const dir = await temp();
+  const events = [],
+    configs = [];
+  const host = new Host({
+    cli: false,
+    dataDir: path.join(dir, "data"),
+    emit: (_name, event) => events.push(event),
+  });
+  t.after(async () => {
+    await host.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  const version = (await host.request("app.info")).version;
+  const cache = path.join(dir, ".cache/islet", version);
+  await fs.mkdir(cache, { recursive: true });
+  await fs.writeFile(
+    path.join(cache, "host.mjs"),
+    "// incomplete installation",
+  );
+  host.remoteConfigs.set(
+    "ssh:fixture",
+    host.config({ hostId: "ssh:fixture", configFile: "/fixture/ssh_config" }),
+  );
+  host.runSsh = async (config, command) => {
+    configs.push(config);
+    return (
+      await promisify(execFile)("/bin/sh", ["-c", command], {
+        env: { ...process.env, HOME: dir },
+      })
+    ).stdout;
+  };
+  assert.equal(
+    (await host.probe({ hostId: "ssh:fixture" })).helperInstalled,
+    false,
+  );
+  await assert.rejects(
+    host.connect({ hostId: "ssh:fixture" }),
+    (error) =>
+      error.code === "REMOTE_SETUP_REQUIRED" &&
+      error.details.version === version,
+  );
+  assert.equal(host.connections.size, 0);
+  assert.equal(events.at(-1).state, "setup-needed");
+  assert.equal(
+    await fs.readFile(path.join(cache, "host.mjs"), "utf8"),
+    "// incomplete installation",
+  );
+  await assert.rejects(host.setup({ hostId: "ssh:fixture" }), {
+    code: "SETUP_APPROVAL_REQUIRED",
+  });
+  await fs.writeFile(path.join(cache, "node"), "#!/bin/sh\n", { mode: 0o600 });
+  assert.equal(
+    (await host.probe({ hostId: "ssh:fixture" })).helperInstalled,
+    false,
+  );
+  await fs.chmod(path.join(cache, "node"), 0o700);
+  assert.equal(
+    (await host.probe({ hostId: "ssh:fixture" })).helperInstalled,
+    true,
+  );
+  assert.ok(
+    configs.every((config) => config.configFile === "/fixture/ssh_config"),
+  );
+});
 async function interpreterFixture(dir, name = "python") {
   const executable = path.join(dir, name);
   await fs.mkdir(path.dirname(executable), { recursive: true });

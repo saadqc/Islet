@@ -461,11 +461,15 @@ export class Host {
       await this.codespaces.ensureTransport(
         p.hostId.slice("codespace:".length),
       );
-    const config = this.config(p);
+    const config = this.config({ ...this.remoteConfigs.get(p.hostId), ...p });
     const code =
       "import os,sys,json,platform,shutil; p=os.path.expanduser('~/.cache/islet'); a=os.path.expanduser('~'); print(json.dumps({'os':platform.system(),'arch':platform.machine(),'python':sys.version.split()[0],'freeBytes':shutil.disk_usage(a).free,'cachePath':p,'writable':os.access(a,os.W_OK),'helperInstalled':os.path.isfile(p+'/" +
       VERSION +
-      "/host.mjs')}))";
+      "/host.mjs') and os.path.isfile(p+'/" +
+      VERSION +
+      "/node') and os.access(p+'/" +
+      VERSION +
+      "/node',os.X_OK)}))";
     const result = JSON.parse(
       await this.runSsh(config, `python3 -c ${quote(code)}`),
     );
@@ -482,7 +486,7 @@ export class Host {
       await this.codespaces.ensureTransport(
         p.hostId.slice("codespace:".length),
       );
-    const config = this.config(p);
+    const config = this.config({ ...this.remoteConfigs.get(p.hostId), ...p });
     if (!p.approve)
       throw Object.assign(
         new Error(
@@ -575,7 +579,10 @@ export class Host {
           this.emit("host-event", {
             type: "connection",
             hostId: config.hostId,
-            state: "disconnected",
+            state:
+              error.code === "REMOTE_SETUP_REQUIRED"
+                ? "setup-needed"
+                : "disconnected",
             error: errorObject(error),
           });
         throw error;
@@ -610,6 +617,24 @@ export class Host {
     const helper = config.helperPath;
     if (helper && (!path.posix.isAbsolute(helper) || helper.includes("\0")))
       throw new Error("Existing helper path must be absolute."); // shell arguments below are individually quoted, never reconstructed project paths
+    if (!helper && !config.codespaceId) {
+      const info = await this.probe(config);
+      cancelled();
+      if (!info.helperInstalled)
+        throw Object.assign(
+          new Error(
+            `The SSH helper for Islet ${VERSION} is not installed on ${config.target}. Set up this version to reconnect.`,
+          ),
+          {
+            code: "REMOTE_SETUP_REQUIRED",
+            details: {
+              hostId: config.hostId,
+              version: VERSION,
+              cachePath: path.posix.join(info.cachePath, VERSION),
+            },
+          },
+        );
+    }
     const command = helper
       ? `${quote(config.systemNode || "node")} ${quote(path.posix.join(helper, "host.mjs"))} --remote`
       : `exec "$HOME/.cache/islet/${VERSION}/node" "$HOME/.cache/islet/${VERSION}/host.mjs" --remote`;

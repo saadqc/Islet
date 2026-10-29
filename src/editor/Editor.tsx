@@ -1,4 +1,5 @@
 import { fileSearch, replaceMode } from "./SearchDock";
+import { readText, writeText } from "../core/clipboard";
 import { renderHover } from "./hover";
 import { minimalEdits } from "../core/edits";
 import { expandSnippet } from "./snippets";
@@ -548,26 +549,48 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(
         bookmarks();
         p.onCommand?.("bookmarks-changed");
       } else if (id === "copy")
-        void navigator.clipboard.writeText(
+        void writeText(
           v.state.sliceDoc(
             v.state.selection.main.from,
             v.state.selection.main.to,
           ),
-        );
+        ).catch(error);
       else if (id === "cut") {
-        void navigator.clipboard.writeText(
+        const state = v.state,
+          documentId = docRef.current.id,
+          version = docRef.current.version;
+        void writeText(
           v.state.sliceDoc(
             v.state.selection.main.from,
             v.state.selection.main.to,
           ),
-        );
-        v.dispatch(v.state.replaceSelection(""));
-      } else if (id === "paste")
-        void navigator.clipboard
-          .readText()
-          .then((text) => v.dispatch(v.state.replaceSelection(text)))
+        )
+          .then(() => {
+            if (
+              viewRef.current === v &&
+              docRef.current.id === documentId &&
+              docRef.current.version === version &&
+              v.state.selection.eq(state.selection)
+            )
+              v.dispatch(v.state.replaceSelection(""));
+          })
           .catch(error);
-      else p.onCommand?.(id);
+      } else if (id === "paste") {
+        const state = v.state,
+          documentId = docRef.current.id,
+          version = docRef.current.version;
+        void readText()
+          .then((text) => {
+            if (
+              viewRef.current === v &&
+              docRef.current.id === documentId &&
+              docRef.current.version === version &&
+              v.state.selection.eq(state.selection)
+            )
+              v.dispatch(v.state.replaceSelection(text));
+          })
+          .catch(error);
+      } else p.onCommand?.(id);
       v.focus();
     };
     const toggleBookmark = (offset?: number) => {

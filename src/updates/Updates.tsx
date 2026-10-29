@@ -148,7 +148,7 @@ export function UpdateSettings({
       <p className="muted" role="status">
         {updateLabel(state)}
       </p>
-      <label className="check">
+      <label className="check-label">
         <input
           type="checkbox"
           checked={state.preferences.autoCheck}
@@ -162,7 +162,7 @@ export function UpdateSettings({
         />
         Automatically check for updates
       </label>
-      <label className="check">
+      <label className="check-label">
         <input
           type="checkbox"
           checked={state.preferences.autoDownload}

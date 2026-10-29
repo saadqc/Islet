@@ -1,9 +1,68 @@
 use serde_json::{json, Value};
-use std::{path::Path, process::Command};
+use std::{
+    io::Write,
+    path::Path,
+    process::{Command, Stdio},
+};
+
+fn text_clipboard(operation: &str, payload: &Value) -> Result<Value, String> {
+    let board = if cfg!(debug_assertions) {
+        std::env::var("ISLET_TEST_PASTEBOARD").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let writing = operation == "desktop.clipboard.writeText";
+    let text = if writing {
+        payload
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or("Clipboard text is required")?
+    } else {
+        ""
+    };
+    let script = if writing {
+        r#"ObjC.import('AppKit'); function run(argv) { var pb = argv[0] ? $.NSPasteboard.pasteboardWithName($(argv[0])) : $.NSPasteboard.generalPasteboard; var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile; var text = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding); pb.clearContents; if (!pb.setStringForType(text, $.NSPasteboardTypeString)) throw Error('Clipboard write failed'); return 'true'; }"#
+    } else {
+        r#"ObjC.import('AppKit'); function run(argv) { var pb = argv[0] ? $.NSPasteboard.pasteboardWithName($(argv[0])) : $.NSPasteboard.generalPasteboard; var text = pb.stringForType($.NSPasteboardTypeString); return JSON.stringify(text ? ObjC.unwrap(text) : ''); }"#
+    };
+    let mut child = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", script, "--", &board])
+        .stdin(if writing {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "The text clipboard is unavailable.".to_string())?;
+    // Clipboard contents travel over stdin, never shell interpolation or argv.
+    if writing {
+        child
+            .stdin
+            .take()
+            .ok_or("Clipboard input unavailable")?
+            .write_all(text.as_bytes())
+            .map_err(|_| "Could not copy text to the clipboard")?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| "The text clipboard did not respond")?;
+    if !output.status.success() {
+        return Err("The text clipboard could not be accessed. Try the native Edit menu.".into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| "Invalid clipboard response".into())
+}
 
 pub fn handle(operation: &str, payload: &Value) -> Result<Value, String> {
     if !cfg!(target_os = "macos") {
         return Err("File clipboard integration is currently supported on macOS.".into());
+    }
+    if matches!(
+        operation,
+        "desktop.clipboard.readText" | "desktop.clipboard.writeText"
+    ) {
+        return text_clipboard(operation, payload);
     }
     // JXA uses the system AppKit file-URL pasteboard, without Apple Events,
     // clipboard text access, shell interpolation, or an additional runtime.
@@ -67,4 +126,33 @@ pub fn handle(operation: &str, payload: &Value) -> Result<Value, String> {
         return Ok(json!(paths));
     }
     Ok(json!(true))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn text_round_trip_uses_an_isolated_native_pasteboard() {
+        let name = format!("islet-text-test-{}", std::process::id());
+        std::env::set_var("ISLET_TEST_PASTEBOARD", &name);
+        let text = "Unicode café 😃 اردو\n'quotes' $(literal) `literal`";
+        assert_eq!(
+            handle("desktop.clipboard.writeText", &json!({"text":text})).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            handle("desktop.clipboard.readText", &json!({})).unwrap(),
+            json!(text)
+        );
+        assert_eq!(
+            handle("desktop.clipboard.readFiles", &json!({})).unwrap(),
+            json!([])
+        );
+        handle("desktop.clipboard.writeText", &json!({"text":""})).unwrap();
+        assert_eq!(
+            handle("desktop.clipboard.readText", &json!({})).unwrap(),
+            json!("")
+        );
+        std::env::remove_var("ISLET_TEST_PASTEBOARD");
+    }
 }

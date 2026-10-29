@@ -114,6 +114,48 @@ try {
   await page.locator(".cm-content").waitFor();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  const evidence = path.join(
+    os.homedir(),
+    "islet-ui-screens",
+    "checkboxes-20261029",
+  );
+  await fs.mkdir(evidence, { recursive: true });
+  for (const theme of ["light", "dark"]) {
+    await settings.getByLabel("Appearance").selectOption(theme);
+    for (const width of [1440, 1024, 768]) {
+      await page.setViewportSize({ width, height: 900 });
+      const rows = await settings
+        .locator(".check-label")
+        .evaluateAll((labels) =>
+          labels.map((label) => {
+            const box = label
+              .querySelector('input[type="checkbox"]')
+              .getBoundingClientRect();
+            const text = [...label.childNodes].find(
+              (node) =>
+                node.nodeType === Node.TEXT_NODE && node.textContent.trim(),
+            );
+            const range = document.createRange();
+            range.selectNodeContents(text);
+            const line = range.getClientRects()[0];
+            return {
+              inline:
+                box.right <= line.left &&
+                Math.abs(box.y + box.height / 2 - (line.y + line.height / 2)) <
+                  4,
+              width: box.width,
+            };
+          }),
+        );
+      assert.ok(
+        rows.length >= 3 && rows.every((row) => row.inline && row.width >= 13),
+        JSON.stringify(rows),
+      );
+      await settings
+        .locator(".update-settings")
+        .screenshot({ path: path.join(evidence, `${theme}-${width}.png`) });
+    }
+  }
   await settings
     .getByRole("button", { name: "Check for Updates", exact: true })
     .click();

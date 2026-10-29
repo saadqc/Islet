@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import jspreadsheet from "jspreadsheet-ce";
+import { readText } from "../core/clipboard";
 import { Modal } from "../shell/Modal";
 import {
   changeWorkbookSheets,
@@ -140,10 +141,9 @@ const SpreadsheetEditor = forwardRef<
         );
       } else if (id === "copy" || id === "cut") grid.copy(id === "cut");
       else if (id === "paste") {
-        void navigator.clipboard
-          .readText()
+        void readText()
           .then((text) => {
-            if (grid.selectedCell)
+            if (instance.current === grid && grid.selectedCell)
               grid.paste(
                 Number(grid.selectedCell[0]),
                 Number(grid.selectedCell[1]),
