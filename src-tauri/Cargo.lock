@@ -1834,9 +1834,12 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "islet"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest",
  "rfd",
  "serde",

@@ -85,6 +85,7 @@ import {
 } from "./files/operations";
 import { openDroppedPaths } from "./shell/fileDrops";
 import { attachWorkspaceRoot, mergeManifestRoots } from "./workspaces/roots";
+import { windowTitle, type RecentProject } from "./workspaces/recents";
 import { UpdateDialog, UpdateSettings, useUpdates } from "./updates/Updates";
 import { restartBlocked, updateLabel } from "./updates/client";
 const documents = new DocumentStore(),
@@ -103,6 +104,7 @@ type MenuItem = {
 };
 export default function App() {
   const [tick, setTick] = useState(0),
+    [recents, setRecents] = useState<RecentProject[]>([]),
     [roots, setRootState] = useState<Root[]>([]),
     [tabs, setTabs] = useState<string[]>([]),
     [active, setActive] = useState(""),
@@ -343,6 +345,8 @@ export default function App() {
         languages.clientId = windowId.current;
         const prefs = await request<any>("settings.load", {});
         if (prefs) setSettings(validatePreferences(prefs));
+        const recent = await request<RecentProject[]>("recents.list");
+        setRecents(Array.isArray(recent) ? recent : []);
         const initialArgs =
           windowId.current === "main"
             ? await request<string[]>("app.initialArgs", {}).catch(() => [])
@@ -470,7 +474,10 @@ export default function App() {
   }
   useEffect(() => {
     const before = (e: BeforeUnloadEvent) => {
-      if ([...documents.documents.values()].some((d) => d.dirty)) {
+      if (
+        !allowClose.current &&
+        [...documents.documents.values()].some((d) => d.dirty)
+      ) {
         e.preventDefault();
         e.returnValue = "";
       }
@@ -481,6 +488,8 @@ export default function App() {
   useEffect(() => {
     let off: (() => void) | undefined;
     void onHostEvent("host-event", (event) => {
+      if (event.type === "recent-projects") setRecents(event.entries);
+      if (event.type === "recent-open-error") fail(event.message);
       if (event.type === "file-changed") {
         const id = documentId(event.hostId, event.path);
         if (documents.documents.has(id))
@@ -559,8 +568,38 @@ export default function App() {
         name: workspaceName,
         workspaceId,
         workspaceIdentity,
+        firstFolder: windowTitle(roots, workspaceName),
+        roots: roots.map(({ hostId, path }) => ({ hostId, path })),
+        empty: !roots.length && !documents.documents.size,
       }).catch(fail);
-  }, [ready, workspaceName, workspaceId, workspaceIdentity]);
+  }, [
+    ready,
+    workspaceName,
+    workspaceId,
+    workspaceIdentity,
+    roots,
+    tabs.length,
+  ]);
+  async function rememberRecent(
+    project: Omit<RecentProject, "id" | "updated">,
+  ) {
+    try {
+      const recent = await request<RecentProject[]>("recents.record", project);
+      if (Array.isArray(recent)) setRecents(recent);
+    } catch (error) {
+      console.error("Could not save recent project", error);
+    }
+  }
+  async function openRecent(project: RecentProject) {
+    try {
+      await request("app.openRecent", {
+        id: project.id,
+        windowId: windowId.current,
+      });
+    } catch (error) {
+      fail(error);
+    }
+  }
   async function openRestoredRoot(root: Root): Promise<Root> {
     try {
       return await request<Root>("root.open", {
@@ -627,6 +666,19 @@ export default function App() {
     for (const restoredDoc of documents.documents.values())
       if (restoredDoc.hostId === "local") void validateRestored(restoredDoc);
     documents.emit();
+    if (session.workspaceIdentity)
+      void rememberRecent({
+        kind: "workspace",
+        hostId: "local",
+        path: session.workspaceIdentity,
+        name: session.name || base(session.workspaceIdentity),
+      });
+    else if (restored[0])
+      void rememberRecent({
+        kind: "folder",
+        ...restored[0],
+        name: base(restored[0].path),
+      });
   }
   function reconnectHost(hostId: string, interactive = false): Promise<void> {
     if (updates.frozenRef.current) return Promise.resolve();
@@ -759,6 +811,12 @@ export default function App() {
         tx.files.every((file: any) => ids.has(file.documentId)),
       ),
     });
+    await rememberRecent({
+      kind: "workspace",
+      hostId: "local",
+      path: manifest.manifestPath || path,
+      name: manifest.name || base(path),
+    });
   }
   async function showRecoveries() {
     try {
@@ -855,11 +913,17 @@ export default function App() {
         hostOverride && hostOverride !== "local"
           ? { hostId: hostOverride, path: value }
           : parseLocation(value);
-      return await attachWorkspaceRoot(
+      const opened = await attachWorkspaceRoot(
         { ...configuration, ...parsed },
         languages,
         request,
       );
+      await rememberRecent({
+        kind: "folder",
+        ...opened,
+        name: base(opened.path),
+      });
+      return opened;
     } catch (e) {
       if (
         parsed &&
@@ -1320,6 +1384,10 @@ export default function App() {
   }
   function command(id: string) {
     if (updates.frozenRef.current) return;
+    if (id === "newWorkspace") {
+      void request("app.newWindow").catch(fail);
+      return;
+    }
     if (
       isEditorTextControl(document.activeElement) &&
       [
@@ -1782,6 +1850,10 @@ export default function App() {
               x: e.clientX,
               y: 43,
               items: [
+                {
+                  label: "New Workspace",
+                  action: () => void request("app.newWindow").catch(fail),
+                },
                 { label: "Open File…", action: () => void openFile() },
                 {
                   label: "Add Local Folder…",
@@ -1826,6 +1898,14 @@ export default function App() {
                   label: "Recover Workspace…",
                   action: () => void showRecoveries(),
                 },
+                ...recents.slice(0, 10).map((project, index) => ({
+                  label:
+                    "Open Recent: " +
+                    project.name +
+                    (project.hostId !== "local" ? " (SSH)" : ""),
+                  action: () => void openRecent(project),
+                  separator: index === 0,
+                })),
                 {
                   label: "Save Workspace As…",
                   action: async () => {
@@ -1847,6 +1927,12 @@ export default function App() {
                           path,
                         });
                         setWorkspaceIdentity(saved.manifestPath || path);
+                        await rememberRecent({
+                          kind: "workspace",
+                          hostId: "local",
+                          path: saved.manifestPath || path,
+                          name: workspaceName,
+                        });
                       }
                     } catch (e) {
                       fail(e);
@@ -2464,25 +2550,69 @@ export default function App() {
               <div className="welcome-mark">
                 <Folder size={37} />
               </div>
-              <h1>A quiet place for your code.</h1>
+              <h1>
+                {roots.length
+                  ? windowTitle(roots, workspaceName)
+                  : "Welcome to Islet"}
+              </h1>
               <p>
                 Open a folder, or bring local and SSH projects into one
                 workspace.
               </p>
-              <button className="primary" onClick={browseAdd}>
-                <Folder size={16} />
-                Open Folder…
-              </button>
-              <button
-                onClick={() => {
-                  setAddHost("");
-                  setAddPath("");
-                  setModal("add-ssh");
-                }}
-              >
-                Connect over SSH…
-              </button>
+              <div className="welcome-actions">
+                <button className="primary" onClick={browseAdd}>
+                  <Folder size={16} />
+                  Open Folder…
+                </button>
+                <button
+                  onClick={() => void request("app.newWindow").catch(fail)}
+                >
+                  New Workspace
+                </button>
+                <button
+                  onClick={() => {
+                    setAddHost("");
+                    setAddPath("");
+                    setModal("add-ssh");
+                  }}
+                >
+                  Connect over SSH…
+                </button>
+              </div>
               <small>⌘⇧F Find in Files · ⌘B Definition · ⇧F6 Rename</small>
+              {recents.length > 0 && (
+                <section
+                  className="recent-projects"
+                  aria-label="Recent projects"
+                >
+                  <h2>Recent projects</h2>
+                  {recents.slice(0, 8).map((project) => (
+                    <button
+                      key={project.id}
+                      onClick={() => void openRecent(project)}
+                      title={project.path}
+                    >
+                      <Folder size={17} />
+                      <span>
+                        <strong>{project.name}</strong>
+                        <small>
+                          {project.hostId !== "local"
+                            ? project.hostId.replace(/^ssh:/, "") + " · "
+                            : ""}
+                          {project.path}
+                        </small>
+                      </span>
+                      <span className="recent-kind">
+                        {project.kind === "workspace"
+                          ? "Workspace"
+                          : project.hostId === "local"
+                            ? "Folder"
+                            : "SSH"}
+                      </span>
+                    </button>
+                  ))}
+                </section>
+              )}
             </div>
           )}
         </section>

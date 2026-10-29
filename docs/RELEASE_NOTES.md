@@ -1,11 +1,11 @@
-Islet 0.1.10 fixes SSH reconnection when reopening or returning to a workspace window.
+Islet 0.1.11 improves workspace startup, window closing and recent projects.
 
-- The Reconnect button now restores SSH access and reattaches remote folders before refreshing their contents. The folder context menu uses the same recovery flow.
-- SSH folders reconnect automatically when a workspace opens or its window regains focus. Folders and windows on the same host share one connection attempt and reuse a healthy connection.
-- Failed connection attempts can be retried. Unresponsive channels are retired, cancelled startups stay cancelled, and late events from an old channel cannot disconnect its replacement.
-- Reconnection restores file watches and language services while preserving unsaved edits and checking remote file revisions. It never retries a save automatically. A missing remote folder no longer blocks other folders on that host.
-- Connection errors wrap within the Project sidebar and provide a clear Reconnect button.
+- New Workspace opens an empty window where you can add folders yourself, while preserving your existing workspace. It is available on the start screen, in the workspace menu and through a configurable shortcut.
+- Recently opened folders and workspace files appear on the start screen and in the workspace menu. The macOS Dock offers the four most recent projects, and window titles show the first folder's name instead of a full path. Reopening focuses an existing project window or opens it separately when needed.
+- Folders start collapsed and remember your expansion choices locally.
+- Fixed window closing, including saving or keeping unsaved recovery buffers before closing.
+- Restored SSH editors wait for their folder to finish attaching before starting language services, preventing an early “outside attached roots” error. MarinaShell-style incoming folders are covered by the isolated SSH checks.
 
-Everything continues to run locally without a vendor service. Existing SSH authentication and remote-helper setup requirements still apply; setting up or upgrading a remote helper requires approval. DOCX is supported; legacy DOC remains unsupported, and advanced Office formatting is not guaranteed to round trip losslessly.
+Everything continues to run locally without a vendor service. New remote-helper setup or upgrades still require approval. DOCX is supported; legacy DOC remains unsupported, and advanced Office formatting is not guaranteed to round trip losslessly.
 
 Install using the Apple silicon DMG or Check for Updates. macOS 13.5 or newer is required. The preview is ad-hoc signed and **not notarized**; automatic-update archives have independent cryptographic signatures. Source archives and dependency notices accompany the AGPLv3 release.

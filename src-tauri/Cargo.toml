@@ -1,6 +1,6 @@
 [package]
 name = "islet"
-version = "0.1.10"
+version = "0.1.11"
 description = "A focused desktop code editor"
 license = "AGPL-3.0-only"
 authors = ["Islet contributors"]
@@ -22,6 +22,11 @@ rfd = "0.15"
 tauri-plugin-updater = "2"
 reqwest = { version = "0.13", default-features = false }
 tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSMenu", "NSMenuItem"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

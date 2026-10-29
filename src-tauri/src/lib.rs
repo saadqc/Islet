@@ -13,7 +13,10 @@ use std::{
 use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 mod desktop;
+#[cfg(target_os = "macos")]
+mod dock;
 mod file_clipboard;
+mod recent;
 mod updater;
 
 type Reply = Result<Value, String>;
@@ -220,6 +223,46 @@ async fn host_request(
     if operation == "app.windowId" {
         return Ok(json!(window.label()));
     }
+    if operation == "app.openRecent" {
+        return recent::open(
+            app,
+            p.get("id")
+                .and_then(Value::as_str)
+                .ok_or("Choose a recent project")?,
+        )
+        .await;
+    }
+    #[cfg(debug_assertions)]
+    if operation == "app.testWindow" {
+        let target = p
+            .get("windowId")
+            .and_then(Value::as_str)
+            .unwrap_or(window.label());
+        let target = app
+            .get_webview_window(target)
+            .ok_or("Test window not found")?;
+        if p.get("focus").and_then(Value::as_bool) == Some(true) {
+            let _ = target.show();
+            target.set_focus().map_err(|e| e.to_string())?;
+        }
+        if p.get("close").and_then(Value::as_bool) == Some(true) {
+            target.close().map_err(|e| e.to_string())?;
+        }
+        return Ok(json!({"title":target.title().map_err(|e| e.to_string())?}));
+    }
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    if operation == "app.testDock" {
+        let action = p
+            .get("action")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize);
+        let (tx, rx) = oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(dock::inspect(action));
+        })
+        .map_err(|e| e.to_string())?;
+        return rx.await.map_err(|e| e.to_string());
+    }
     if operation == "app.initialArgs" {
         return Ok(json!(state.initial_args));
     }
@@ -248,26 +291,46 @@ async fn host_request(
         return Ok(json!(true));
     }
     if operation == "app.newWindow" {
-        let label = format!(
-            "workspace-{:x}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| e.to_string())?
-                .as_nanos(),
-            state.next.fetch_add(1, Ordering::Relaxed)
-        );
-        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
-            .title("Islet")
-            .inner_size(1280.0, 820.0)
-            .min_inner_size(700.0, 450.0)
-            .build()
-            .map_err(|e| e.to_string())?;
-        state
-            .request("app.reserveWindow".into(), json!({"windowId":label}))
-            .await?;
-        return Ok(json!({"windowId":label}));
+        return Ok(json!({"windowId":new_window(&app).await?}));
     }
-    state.request(operation, p).await
+    let update_menu = matches!(
+        operation.as_str(),
+        "recents.record" | "recents.list" | "app.registerWindow"
+    );
+    if operation == "app.registerWindow" {
+        let title = p
+            .get("firstFolder")
+            .and_then(Value::as_str)
+            .unwrap_or("Islet");
+        window.set_title(title).map_err(|e| e.to_string())?;
+    }
+    let result = state.request(operation, p).await;
+    if update_menu {
+        recent::refresh(&app).await;
+    }
+    result
+}
+
+async fn new_window(app: &tauri::AppHandle) -> Result<String, String> {
+    let state = app.state::<HostState>();
+    let label = format!(
+        "workspace-{:x}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos(),
+        state.next.fetch_add(1, Ordering::Relaxed)
+    );
+    tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title("Islet")
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(700.0, 450.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    state
+        .request("app.reserveWindow".into(), json!({"windowId":label}))
+        .await?;
+    Ok(label)
 }
 
 pub fn run() {
@@ -304,6 +367,10 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = dock::install() {
+                eprintln!("Dock recent projects unavailable: {error}");
+            }
             let state = HostState::start(app.handle().clone()).map_err(std::io::Error::other)?;
             app.manage(state);
             updater::start(app.handle());

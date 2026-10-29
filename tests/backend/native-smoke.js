@@ -24,6 +24,11 @@
     const info = await call("app.info");
     report.runtime = info;
     report.checks.push("Native Tauri-to-Node IPC and bundled runtime");
+    const project = await wait(() =>
+      document.querySelector('.tree-row[data-root="true"]'),
+    );
+    if (project.getAttribute("aria-expanded") === "false")
+      project.querySelector(".tree-chevron").click();
     await wait(() =>
       [...document.querySelectorAll(".tree-row")].find((e) =>
         e.textContent.includes("main.py"),

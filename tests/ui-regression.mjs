@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import {createHash} from 'node:crypto';
 import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
@@ -43,7 +44,8 @@ const openFile=async(name)=>{await page.locator('.tree-name').getByText(name,{ex
 const text=async()=>content().innerText();
 const closeDialog=async()=>page.getByRole('button',{name:'Close dialog',exact:true}).click();
 try {
- await page.goto('http://127.0.0.1:1420/?root='+encodeURIComponent(fixture));
+ await openFixtureRoots(page);
+  await page.goto('http://127.0.0.1:1420/?root='+encodeURIComponent(fixture));
  await page.locator('.tree-name').getByText('notes.txt',{exact:true}).waitFor();
  await openFile('notes.txt');
  await step('a handled bookmark shortcut toggles once',async()=>{await content().click();await page.keyboard.press('Meta+F11');await page.getByRole('button',{name:'Bookmarks',exact:true}).click();assert.equal(await page.locator('.bookmark-row').count(),1);await closeDialog();});

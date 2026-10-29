@@ -239,6 +239,9 @@ export class LanguageManager {
     root: Root,
     document?: DocumentModel,
   ): Promise<Session | undefined> {
+    // Restored editors mount before SSH root.open has registered their scope.
+    // Reattachment starts services with the ready root and the retained buffer.
+    if (root.state && root.state !== "ready") return;
     const language = document ? languageFor(document.path) : "python";
     if (!language) return;
     const key = JSON.stringify([

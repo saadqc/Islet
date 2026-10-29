@@ -465,6 +465,52 @@ select:focus {
   gap: 11px;
   padding: 30px;
   text-align: center;
+  overflow: auto;
+  justify-content: safe center;
+}
+.recent-projects {
+  width: min(500px, 100%);
+  text-align: left;
+  margin-top: 20px;
+}
+.recent-projects h2 {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+.recent-projects > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.recent-projects > button:hover {
+  background: var(--hover);
+}
+.recent-projects > button > span:first-of-type {
+  min-width: 0;
+  flex: 1;
+}
+.recent-projects strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.welcome .recent-projects small {
+  display: block;
+  margin: 3px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-kind {
+  font-size: 10px;
+  color: var(--muted);
 }
 .welcome-mark {
   border: 1px solid var(--border);
@@ -475,6 +521,19 @@ select:focus {
   place-items: center;
   margin-bottom: 8px;
   color: #6697ef;
+  flex-shrink: 0;
+}
+.welcome-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.welcome > small {
+  margin-top: 14px;
+}
+.welcome .recent-projects small {
+  color: var(--muted);
 }
 .welcome h1 {
   font-size: 20px;

@@ -191,6 +191,34 @@ try {
   });
   assert.notEqual(localRoot.id, remoteRoot.id);
   assert.equal(remoteRoot.hostId, config.hostId);
+  // MarinaShell-generated manifests supply their own IDs and can add a new,
+  // unrelated remote folder while this SSH transport is already connected.
+  const incomingPath = path.join(temp, "marina incoming folder");
+  await fs.mkdir(incomingPath);
+  await fs.writeFile(path.join(incomingPath, "incoming.py"), "answer = 42\n");
+  const incoming = await host.request("root.open", {
+    hostId: config.hostId,
+    path: incomingPath,
+    id: "marinashell-generated-root",
+    label: "Incoming",
+    clientId: "incoming-window",
+  });
+  assert.equal(
+    (
+      await host.request("fs.list", {
+        hostId: config.hostId,
+        path: incoming.path,
+      })
+    )[0].name,
+    "incoming.py",
+  );
+  const incomingService = await host.request("lsp.start", {
+    root: incoming,
+    language: "python",
+    clientId: "incoming-window",
+  });
+  assert.ok(incomingService.sessionId);
+  await host.request("lsp.stop", { sessionId: incomingService.sessionId });
   // Exercise real OpenSSH framing with binary chunks and helper-side ZIP staging.
   await fs.mkdir(path.join(temp, "outbound"));
   await fs.writeFile(

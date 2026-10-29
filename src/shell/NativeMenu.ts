@@ -41,6 +41,7 @@ export function useNativeMenu(
           {
             text: "Islet",
             items: [
+              commandItem("newWorkspace"),
               commandItem("settings"),
               item("checkUpdates", "Check for Updates…"),
               { item: "Separator" },

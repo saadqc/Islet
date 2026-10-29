@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import { chromium, expect } from "@playwright/test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -146,6 +147,7 @@ try {
     [...sessions.values()].find((value) =>
       value?.roots?.some((root) => root.id === "first-ui"),
     );
+  await openFixtureRoots(page);
   await page.goto("http://127.0.0.1:1420/");
   await open("first.py");
   const firstSession = await wait(

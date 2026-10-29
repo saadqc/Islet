@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import { chromium, expect } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -156,6 +157,7 @@ try {
     await dialog.getByRole("button", { name: "Create", exact: true }).click();
     await expect(dialog).toHaveCount(0);
   };
+  await openFixtureRoots(page);
   await page.goto("http://127.0.0.1:1420/?root=" + encodeURIComponent(fixture));
   await tree("data.csv").waitFor();
   await open("document.docx");

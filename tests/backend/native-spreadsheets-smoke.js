@@ -28,6 +28,11 @@
       [...document.querySelectorAll(".tree-row")].find(
         (row) => row.getAttribute("aria-label") === name,
       );
+    const project = await wait(() =>
+      document.querySelector('.tree-row[data-root="true"]'),
+    );
+    if (project.getAttribute("aria-expanded") === "false")
+      project.querySelector(".tree-chevron").click();
     for (const name of ["native.csv", "native.xls", "native.xlsx"]) {
       await wait(() => tree(name));
       tree(name).click();

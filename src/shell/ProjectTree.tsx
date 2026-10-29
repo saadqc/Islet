@@ -48,9 +48,19 @@ function Node({
 }) {
   const [hover, setHover] = useState(false);
   const loadVersion = useRef(0);
-  const [expanded, setExpanded] = useState(depth === 0),
+  const expansionKey = "islet.folder.expanded:" + root.hostId + ":" + path;
+  const [expanded, setExpandedState] = useState(
+      () => localStorage.getItem(expansionKey) === "true",
+    ),
     [entries, setEntries] = useState<Entry[]>([]),
     [error, setError] = useState("");
+  const setExpanded = (update: boolean | ((value: boolean) => boolean)) => {
+    setExpandedState((value) => {
+      const next = typeof update === "function" ? update(value) : update;
+      localStorage.setItem(expansionKey, String(next));
+      return next;
+    });
+  };
   async function load() {
     const version = ++loadVersion.current;
     try {
@@ -128,6 +138,7 @@ function Node({
           }
         }}
         role="treeitem"
+        data-root={depth === 0 ? "true" : undefined}
         tabIndex={0}
         aria-label={name}
         aria-expanded={folder ? expanded : undefined}

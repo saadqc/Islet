@@ -35,6 +35,11 @@
     const args = await call("app.initialArgs");
     const standalone = args.some((value) => value.endsWith("/native.docx"));
     if (!standalone) {
+      const project = await wait(() =>
+        document.querySelector('.tree-row[data-root="true"]'),
+      );
+      if (project.getAttribute("aria-expanded") === "false")
+        project.querySelector(".tree-chevron").click();
       await wait(() => tree("native.docx"));
       tree("native.docx").click();
     }

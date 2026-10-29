@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import { chromium, expect } from "@playwright/test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -181,6 +182,7 @@ try {
     viewport: { width: 1280, height: 900 },
   });
   await prepare(page);
+  await openFixtureRoots(page);
   await page.goto("http://127.0.0.1:1420/");
   await expect(
     page.locator(".tree-name").getByText("notes.txt", { exact: true }),
@@ -286,6 +288,7 @@ try {
   const other = await browser.newPage();
   const beforeOpen = connects();
   await prepare(other);
+  await openFixtureRoots(other);
   await other.goto("http://127.0.0.1:1420/");
   await expect(
     other.locator(".tree-name").getByText("notes.txt", { exact: true }),

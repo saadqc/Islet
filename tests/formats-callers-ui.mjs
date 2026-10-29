@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import { chromium, expect } from "@playwright/test";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -76,6 +77,7 @@ try {
     await page.locator(".tree-name").getByText(name, { exact: true }).click();
     await expect(page.locator(".tab.active")).toContainText(name);
   };
+  await openFixtureRoots(page);
   await page.goto("http://127.0.0.1:1420/?root=" + encodeURIComponent(fixture));
   for (const [name, label] of [
     ["sample.json", "JSON"],

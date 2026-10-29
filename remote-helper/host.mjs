@@ -1,4 +1,5 @@
 import { FileJobs } from "./file-jobs.mjs";
+import { RecentProjects } from "./recents.mjs";
 import { Engine, VERSION, errorObject } from "./engine.mjs";
 import { Codespaces, codespaceTransportError } from "./codespaces.mjs";
 import fs from "node:fs/promises";
@@ -29,6 +30,7 @@ export class Host {
       hostId: "local",
     });
     this.connections = new Map();
+    this.recents = new RecentProjects(this.engine, this.emit);
     this.connecting = new Map();
     this.remoteConfigs = new Map();
     this.windows = new Map();
@@ -43,6 +45,28 @@ export class Host {
     });
   }
   async request(operation, p = {}) {
+    if (operation.startsWith("recents.")) {
+      if (remoteMode)
+        throw new Error("Recent projects are stored on the desktop.");
+      if (operation === "recents.list") return this.recents.list();
+      if (operation === "recents.record") return this.recents.record(p);
+      if (operation === "recents.get") return this.recents.get(p.id);
+    }
+    if (operation === "app.openRecent") {
+      const project = await this.recents.get(p.id);
+      const destination = this.windows.get(p.windowId);
+      if (!destination?.empty)
+        throw new Error(
+          "Open this recent project in a new desktop window to preserve the current workspace.",
+        );
+      return this.deliver({
+        operation: project.kind === "workspace" ? "open" : "add",
+        windowId: p.windowId,
+        ...(project.kind === "workspace"
+          ? { workspace: project.path }
+          : { roots: [project] }),
+      });
+    }
     if (operation.startsWith("files.")) {
       if (remoteMode)
         throw new Error("File job coordination runs on the desktop host.");
@@ -137,6 +161,9 @@ export class Host {
         name: p.name ?? existing.name ?? "Workspace",
         workspaceId: p.workspaceId ?? existing.workspaceId,
         workspaceIdentity: p.workspaceIdentity ?? existing.workspaceIdentity,
+        firstFolder: p.firstFolder ?? existing.firstFolder,
+        roots: p.roots ?? existing.roots ?? [],
+        empty: p.empty ?? existing.empty ?? false,
         focused: p.focused == null ? !!existing.focused : !!p.focused,
         ready: true,
         updated: Date.now(),

@@ -1,3 +1,4 @@
+import { openFixtureRoots } from "./project-tree-helper.mjs";
 import { chromium, expect } from "@playwright/test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -111,6 +112,7 @@ async function point(line, token) {
     }, token);
 }
 try {
+  await openFixtureRoots(page);
   await page.goto("http://127.0.0.1:1420/?root=" + encodeURIComponent(root));
   await open("b.txt");
   await open("c.txt");

@@ -4,6 +4,11 @@ export const isMac = () =>
 type Shortcut = { label: string; group: string; binding: string; mac?: string };
 export const shortcuts: Record<string, Shortcut> = {
   newFile: { label: "New File…", group: "Files", binding: "Mod-n" },
+  newWorkspace: {
+    label: "New Workspace",
+    group: "Files",
+    binding: "Mod-Alt-n",
+  },
   openFile: { label: "Open File…", group: "Files", binding: "Mod-o" },
   save: {
     label: "Save",
