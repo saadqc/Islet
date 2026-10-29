@@ -11,6 +11,42 @@ import {
 } from "../../remote-helper/engine.mjs";
 import { Host } from "../../remote-helper/host.mjs";
 import { parseArgs } from "../../scripts/islet.mjs";
+
+test("disconnect cancels an SSH startup waiting for authentication setup", async (t) => {
+  const dir = await temp();
+  const events = [];
+  const host = new Host({
+    cli: false,
+    dataDir: dir,
+    emit: (name, event) => events.push(event),
+  });
+  t.after(async () => {
+    await host.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  let release, entered;
+  const waiting = new Promise((resolve) => {
+    entered = resolve;
+  });
+  host.sshEnvironment = () => {
+    entered();
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  };
+  const startup = host.connect({ hostId: "ssh:fixture" });
+  const cancelled = assert.rejects(startup, { code: "DISCONNECTED" });
+  await waiting;
+  await host.disconnect("ssh:fixture");
+  release(process.env);
+  await cancelled;
+  assert.equal(host.connections.size, 0);
+  assert.equal(host.connecting.size, 0);
+  assert.equal(
+    events.some((event) => event.state === "ready"),
+    false,
+  );
+});
 const temp = () => fs.mkdtemp(path.join(os.tmpdir(), "islet-backend-"));
 async function interpreterFixture(dir, name = "python") {
   const executable = path.join(dir, name);

@@ -1,11 +1,4 @@
-export interface Root {
-  id: string;
-  hostId: string;
-  path: string;
-  label: string;
-  state?: string;
-  interpreter?: string;
-}
+export type { Root } from "../core/types";
 export interface Entry {
   name: string;
   path: string;

@@ -139,8 +139,42 @@ try {
     code: "HOST_KEY_CHANGED",
   });
   await fs.writeFile(path.join(temp, "known_hosts"), trustedKnownHosts);
+  const failureEvents = events.length;
+  const failures = await Promise.allSettled(
+    Array.from({ length: 4 }, () =>
+      host.request("remote.connect", {
+        ...config,
+        helperPath: path.join(temp, "missing-helper"),
+      }),
+    ),
+  );
+  assert.ok(failures.every((result) => result.status === "rejected"));
+  assert.equal(
+    events
+      .slice(failureEvents)
+      .filter(
+        ({ payload }) =>
+          payload.type === "connection" && payload.state === "connecting",
+      ).length,
+    1,
+  );
+  assert.equal(host.connections.size, 0);
+  assert.equal(
+    host.connecting.size,
+    0,
+    "Failed handshakes must allow a later retry",
+  );
   const connected = await host.request("remote.connect", config);
   assert.equal(connected.state, "ready");
+  const reused = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      host.request("remote.connect", { hostId: config.hostId }),
+    ),
+  );
+  assert.ok(
+    reused.every((result) => result.generation === connected.generation),
+    "Opening another window must not replace a healthy SSH connection",
+  );
   const project = path.join(temp, "project with spaces");
   await fs.mkdir(project);
   await fs.writeFile(
@@ -308,8 +342,33 @@ try {
     { code: "DISCONNECTED" },
   );
   await fs.writeFile(doc.path, "external remote edit\n");
-  await host.request("remote.connect", config);
-  await host.request("root.open", { hostId: config.hostId, path: project });
+  const reconnectEvents = events.length;
+  const restoredRoots = await Promise.all(
+    Array.from({ length: 6 }, (_, i) =>
+      host.request("root.open", {
+        hostId: config.hostId,
+        path: project,
+        clientId: "window-" + i,
+      }),
+    ),
+  );
+  assert.ok(restoredRoots.every((root) => root.id === remoteRoot.id));
+  assert.equal(
+    events
+      .slice(reconnectEvents)
+      .filter(
+        ({ payload }) =>
+          payload.type === "connection" && payload.state === "connecting",
+      ).length,
+    1,
+    "Concurrent restored roots and windows share one SSH connection attempt",
+  );
+  assert.equal(
+    host.remoteConfigs.get(config.hostId).helperPath,
+    config.helperPath,
+    "Host-only reconnect retains custom helper and SSH configuration",
+  );
+  assert.equal(host.connections.size, 1);
   await assert.rejects(
     host.request("fs.save", {
       hostId: config.hostId,

@@ -29,6 +29,7 @@ export class Host {
       hostId: "local",
     });
     this.connections = new Map();
+    this.connecting = new Map();
     this.remoteConfigs = new Map();
     this.windows = new Map();
     this.pendingRequests = [];
@@ -505,12 +506,74 @@ export class Host {
     return this.connect(config);
   }
   async connect(p) {
-    if (p.hostId?.startsWith("codespace:"))
+    if (p.hostId?.startsWith("codespace:")) await this.codespaces.enabled();
+    const config = this.config({ ...this.remoteConfigs.get(p.hostId), ...p });
+    // Roots and windows share a transport. Never let concurrent restores close
+    // one another's handshake, or replace a healthy channel on window focus.
+    const pending = this.connecting.get(config.hostId);
+    if (pending) return pending.promise;
+    const attempt = { cancelled: false };
+    attempt.promise = Promise.resolve().then(async () => {
+      try {
+        const existing = this.connections.get(config.hostId);
+        const previous = this.remoteConfigs.get(config.hostId);
+        const sameTransport =
+          previous &&
+          [
+            "target",
+            "port",
+            "configFile",
+            "helperPath",
+            "systemNode",
+            "ghPath",
+          ].every((key) => previous[key] === config[key]);
+        if (existing?.info && sameTransport && !existing.closed) {
+          try {
+            await existing.request("ping", {}, 5000);
+            if (attempt.cancelled) throw new Error("SSH connection cancelled.");
+            return {
+              hostId: config.hostId,
+              state: "ready",
+              generation: existing.info.generation,
+              info: existing.info,
+            };
+          } catch (error) {
+            if (attempt.cancelled) throw error;
+            existing.close();
+          }
+        }
+        return await this.openConnection(config, attempt);
+      } catch (error) {
+        if (!attempt.cancelled)
+          this.emit("host-event", {
+            type: "connection",
+            hostId: config.hostId,
+            state: "disconnected",
+            error: errorObject(error),
+          });
+        throw error;
+      } finally {
+        if (this.connecting.get(config.hostId) === attempt)
+          this.connecting.delete(config.hostId);
+      }
+    });
+    this.connecting.set(config.hostId, attempt);
+    return attempt.promise;
+  }
+  async openConnection(config, attempt) {
+    const cancelled = () => {
+      if (attempt.cancelled || this.closing)
+        throw Object.assign(new Error("SSH connection cancelled."), {
+          code: "DISCONNECTED",
+        });
+    };
+    cancelled();
+    if (config.hostId.startsWith("codespace:"))
       await this.codespaces.ensureTransport(
-        p.hostId.slice("codespace:".length),
+        config.hostId.slice("codespace:".length),
       );
-    const config = this.config(p);
-    await this.disconnect(config.hostId);
+    cancelled();
+    this.connections.get(config.hostId)?.close();
     this.remoteConfigs.set(config.hostId, config);
     this.emit("host-event", {
       type: "connection",
@@ -524,6 +587,7 @@ export class Host {
       ? `${quote(config.systemNode || "node")} ${quote(path.posix.join(helper, "host.mjs"))} --remote`
       : `exec "$HOME/.cache/islet/${VERSION}/node" "$HOME/.cache/islet/${VERSION}/host.mjs" --remote`;
     const env = await this.sshEnvironment(config);
+    cancelled();
     const options = {
       stdio: ["pipe", "pipe", "pipe"],
       env,
@@ -537,6 +601,7 @@ export class Host {
         ? (stderr) => codespaceTransportError(stderr).message
         : sshError,
       emit: (name, event) => {
+        if (this.connections.get(config.hostId) !== channel) return;
         if (name === "lsp-message")
           event = {
             ...event,
@@ -561,6 +626,7 @@ export class Host {
         this.dispatch(name, event);
       },
       onClose: (error) => {
+        if (this.connections.get(config.hostId) !== channel) return;
         this.connections.delete(config.hostId);
         this.emit("host-event", {
           type: "connection",
@@ -573,6 +639,7 @@ export class Host {
     this.connections.set(config.hostId, channel);
     try {
       const info = await channel.request("app.info", {}, 15000);
+      cancelled();
       if (info.version !== VERSION || info.fileProtocol !== 1)
         throw Object.assign(
           new Error(
@@ -580,6 +647,7 @@ export class Host {
           ),
           { code: "HELPER_VERSION" },
         );
+      channel.info = info;
       this.emit("host-event", {
         type: "connection",
         hostId: config.hostId,
@@ -593,15 +661,18 @@ export class Host {
         info,
       };
     } catch (e) {
-      await this.disconnect(config.hostId);
+      channel.close();
       throw e;
     }
   }
   async remoteRequest(hostId, operation, p) {
     if (hostId.startsWith("codespace:")) await this.codespaces.enabled();
     let channel = this.connections.get(hostId);
-    if (!channel && operation === "root.open") {
-      await this.connect(this.remoteConfigs.get(hostId) || { hostId });
+    if (
+      operation === "root.open" &&
+      (!channel || this.connecting.has(hostId))
+    ) {
+      await this.connect({ hostId });
       channel = this.connections.get(hostId);
     }
     if (!channel)
@@ -643,6 +714,11 @@ export class Host {
     }
   }
   async disconnect(hostId) {
+    const pending = this.connecting.get(hostId);
+    if (pending) {
+      pending.cancelled = true;
+      this.connecting.delete(hostId);
+    }
     const existing = this.connections.get(hostId);
     if (existing) {
       existing.close();
@@ -906,7 +982,9 @@ export class Host {
     this.closing = true;
     await this.codespaces.close();
     await Promise.all(
-      [...this.connections.keys()].map((id) => this.disconnect(id)),
+      [...new Set([...this.connections.keys(), ...this.connecting.keys()])].map(
+        (id) => this.disconnect(id),
+      ),
     );
     await this.engine.close();
     if (this.cliServer) this.cliServer.close();
@@ -930,7 +1008,7 @@ class Channel {
     this.id = 0;
     this.closed = false;
     this.heartbeat = setInterval(
-      () => this.request("ping", {}, 10000).catch(() => {}),
+      () => this.request("ping", {}, 10000).catch(() => this.close()),
       30000,
     );
     this.heartbeat.unref();

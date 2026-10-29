@@ -1,4 +1,5 @@
 .project-island.resizable-project {
+  container-type: inline-size;
   position: relative;
   flex-shrink: 0;
   max-width: 60vw;
@@ -48,7 +49,8 @@
   flex-shrink: 0;
 }
 .tree-content .tree-error {
-  max-width: 400px;
+  width: calc(100cqw - 28px);
+  max-width: calc(100cqw - 28px);
   white-space: normal;
 }
 .terminal-settings {

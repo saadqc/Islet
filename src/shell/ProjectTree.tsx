@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronRight, ChevronDown, RefreshCw } from "lucide-react";
 import {
   FILE_ITEM_MIME,
@@ -23,6 +23,7 @@ function Node({
   onCopy,
   onPaste,
   dropTarget,
+  onReconnect,
 }: {
   root: Root;
   path: string;
@@ -41,24 +42,59 @@ function Node({
   onCopy?: (item: FileItem) => void;
   onPaste?: (target: FileItem) => void;
   dropTarget?: FileItem;
+  onReconnect?: (hostId: string) => Promise<void>;
   folderOpenMode: "single" | "double";
   onSelect: (root: Root, path: string, folder: boolean) => void;
 }) {
   const [hover, setHover] = useState(false);
+  const loadVersion = useRef(0);
   const [expanded, setExpanded] = useState(depth === 0),
     [entries, setEntries] = useState<Entry[]>([]),
     [error, setError] = useState("");
   async function load() {
+    const version = ++loadVersion.current;
     try {
-      setEntries(await request("fs.list", { hostId: root.hostId, path }));
+      const next = await request<Entry[]>("fs.list", {
+        hostId: root.hostId,
+        path,
+      });
+      if (version !== loadVersion.current) return;
+      setEntries(next);
       setError("");
     } catch (e) {
-      setError(String(e));
+      if (version === loadVersion.current)
+        setError(e instanceof Error ? e.message : String(e));
     }
   }
   useEffect(() => {
-    if (expanded && folder) void load();
+    if (
+      expanded &&
+      folder &&
+      (root.hostId === "local" || !root.state || root.state === "ready")
+    )
+      void load();
+    return () => {
+      loadVersion.current++;
+    };
   }, [expanded, path, root]);
+  const connecting = root.state === "connecting";
+  const disconnected =
+    root.hostId !== "local" &&
+    !!root.state &&
+    !["ready", "connecting"].includes(root.state);
+  const problem = disconnected
+    ? root.connectionError ||
+      (root.hostId === "local" ? "Folder unavailable." : "Connection lost.")
+    : error;
+  async function retry() {
+    try {
+      if (root.hostId !== "local" && onReconnect)
+        await onReconnect(root.hostId);
+      else await load();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  }
   return (
     <>
       <div
@@ -180,11 +216,23 @@ function Node({
       </div>
       {expanded && folder && (
         <>
-          {error ? (
-            <div className="tree-error">
-              {error}
-              <button onClick={load} aria-label="Retry folder">
-                <RefreshCw size={12} />
+          {connecting ? (
+            depth === 0 && (
+              <div className="connection-state" role="status">
+                Connecting…
+              </div>
+            )
+          ) : problem ? (
+            <div className="tree-error" role="status">
+              <span>{problem}</span>
+              <button
+                onClick={() => void retry()}
+                aria-label={
+                  root.hostId === "local" ? "Retry folder" : "Reconnect SSH"
+                }
+              >
+                <RefreshCw size={12} />{" "}
+                {root.hostId === "local" ? "Retry" : "Reconnect"}
               </button>
             </div>
           ) : (
@@ -222,6 +270,7 @@ function Node({
                   onCopy={onCopy}
                   onPaste={onPaste}
                   dropTarget={dropTarget}
+                  onReconnect={onReconnect}
                 />
               ))
           )}
@@ -241,6 +290,7 @@ export function ProjectTree({
   onCopy,
   onPaste,
   dropTarget,
+  onReconnect,
 }: {
   roots: Root[];
   onOpen: (host: string, path: string, preview?: boolean) => void;
@@ -256,6 +306,7 @@ export function ProjectTree({
   onCopy?: (item: FileItem) => void;
   onPaste?: (target: FileItem) => void;
   dropTarget?: FileItem;
+  onReconnect?: (hostId: string) => Promise<void>;
   onSelect?: (root: Root, path: string, folder: boolean) => void;
 }) {
   return (
@@ -277,10 +328,8 @@ export function ProjectTree({
               onCopy={onCopy}
               onPaste={onPaste}
               dropTarget={dropTarget}
+              onReconnect={onReconnect}
             />
-            {root.state && root.state !== "ready" && (
-              <div className="connection-state">{root.state}</div>
-            )}
           </div>
         ))}
       </div>

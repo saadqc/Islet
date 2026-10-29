@@ -1,6 +1,6 @@
 {
   "name": "islet",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "desktop": "tauri dev",
     "desktop:build": "node scripts/setup-runtime.mjs && tauri build && node scripts/sign-preview.mjs",
     "test:backend": "node --test --test-concurrency=1 --test-timeout=180000 tests/backend/engine.test.mjs tests/backend/codespaces.test.mjs tests/backend/host-lifetime.test.mjs tests/backend/transfers.test.mjs",
-    "test:ui": "node tests/ui-regression.mjs && node tests/interpreter-ui.mjs && node tests/codespaces-ui.mjs && node tests/sidebar-terminal-ui.mjs && node tests/tabs-navigation-ui.mjs && node tests/updates-ui.mjs && node tests/formats-callers-ui.mjs && node tests/spreadsheets-ui.mjs && node tests/docx-files-ui.mjs && node tests/editor-experience-ui.mjs",
+    "test:ui": "node tests/ui-regression.mjs && node tests/interpreter-ui.mjs && node tests/codespaces-ui.mjs && node tests/sidebar-terminal-ui.mjs && node tests/tabs-navigation-ui.mjs && node tests/updates-ui.mjs && node tests/formats-callers-ui.mjs && node tests/spreadsheets-ui.mjs && node tests/docx-files-ui.mjs && node tests/editor-experience-ui.mjs && node tests/ssh-reconnect-ui.mjs",
     "dev:app": "node scripts/dev.mjs",
     "runtime:setup": "node scripts/setup-runtime.mjs",
     "runtime:remote": "node scripts/setup-runtime.mjs --remote",

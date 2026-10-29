@@ -47,6 +47,8 @@ The application bundle is written to `src-tauri/target/release/bundle/macos/Isle
 
 Open a folder from the workspace menu; add more local or SSH folders from the Project `+` button. SSH uses system OpenSSH configuration and agent authentication, with native authentication prompts. New remote helper setup requires approval for the displayed host/cache path. Existing compatible helpers can be selected instead.
 
+SSH folders reconnect automatically when restoring a workspace or returning to its window. Folders on the same host share one connection attempt; a healthy connection is reused. If authentication or connectivity fails, use **Reconnect** below the affected folder or in its context menu. Reconnection restores folder access and language services while preserving unsaved buffers and detecting remote file conflicts; it never retries a save automatically.
+
 Files open in persistent tabs. Drag tabs to reorder them; double-click or right-click a tab to pin it. Native file drops open multiple files and attach outside parent folders without replacing existing tabs. Cmd/Ctrl-click or Cmd+B opens and reveals definitions; Alt+F7 shows semantic references; Shift+F6 previews project-wide symbol rename. Back/Forward restore selections and scroll, with repeated semantic destinations kept once. Line bookmarks have a dedicated gutter. Find/Replace in Files always shows folder and location fields; a blank folder searches the workspace. Replacement and rename changes remain unsaved and offer grouped undo and explicit saving.
 
 Markdown opens in reading mode. Edit Source preserves the buffer and undo history. Relative images use the owning file provider; network images require explicit opt-in.

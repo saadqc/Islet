@@ -250,6 +250,22 @@ select:focus {
   padding: 8px 15px 20px;
   color: var(--muted);
 }
+.connection-state {
+  color: var(--muted);
+}
+.tree-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.tree-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .tree-empty button {
   margin: 5px 0;
   width: 100%;

@@ -6,6 +6,7 @@ export interface Root {
   path: string;
   label: string;
   state?: string;
+  connectionError?: string;
   interpreter?: string;
 }
 export interface Position {

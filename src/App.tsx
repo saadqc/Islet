@@ -162,6 +162,7 @@ export default function App() {
   const dropFiles = useRef<(paths: string[]) => Promise<void>>(async () => {});
   const recoveryKey = useRef("recovery:" + crypto.randomUUID());
   const handledRequests = useRef(new Set<string>());
+  const remoteReconnects = useRef(new Map<string, Promise<void>>());
   const [referenceIndex, setReferenceIndex] = useState(-1);
   const recentTabs = useRef<string[]>([]);
   const switchOrder = useRef<{ order: string[]; index: number } | null>(null);
@@ -393,8 +394,12 @@ export default function App() {
         windowId: windowId.current,
         focused: true,
       });
+      for (const hostId of new Set(languages.roots.map((root) => root.hostId)))
+        if (hostId.startsWith("ssh:"))
+          void reconnectHost(hostId).catch(() => {});
       for (const id of documents.documents.keys())
-        void documents.checkExternal(id).catch(() => {});
+        if (!documents.documents.get(id)?.hostId.startsWith("ssh:"))
+          void documents.checkExternal(id).catch(() => {});
     };
     window.addEventListener("focus", focus);
     return () => window.removeEventListener("focus", focus);
@@ -517,12 +522,33 @@ export default function App() {
         (!event.request.windowId || event.request.windowId === windowId.current)
       )
         void handleCli(event.request).catch(fail);
-      if (event.type === "connection")
+      if (event.type === "connection") {
         setRoots((rs) =>
           rs.map((r) =>
-            r.hostId === event.hostId ? { ...r, state: event.state } : r,
+            r.hostId === event.hostId
+              ? {
+                  ...r,
+                  state:
+                    event.state === "ready" && event.hostId.startsWith("ssh:")
+                      ? "connecting"
+                      : event.state,
+                  connectionError:
+                    event.error?.message ||
+                    (typeof event.error === "string" ? event.error : undefined),
+                }
+              : r,
           ),
         );
+        // Another window can restore the shared SSH transport. Each window
+        // still needs to reattach its own roots, watches and language buffers.
+        if (
+          event.state === "ready" &&
+          event.hostId.startsWith("ssh:") &&
+          !remoteReconnects.current.has(event.hostId) &&
+          languages.roots.some((root) => root.hostId === event.hostId)
+        )
+          void reconnectHost(event.hostId).catch(() => {});
+      }
     }).then((f) => (off = f));
     return () => off?.();
   }, []);
@@ -586,20 +612,6 @@ export default function App() {
         }
       }),
     );
-    for (const root of restored.filter((root) => root.hostId !== "local"))
-      void openRestoredRoot(root)
-        .then((checked) => {
-          setRoots((rs) => rs.map((r) => (r.id === root.id ? checked : r)));
-          for (const d of documents.documents.values())
-            if (d.hostId === root.hostId) void validateRestored(d);
-        })
-        .catch(() =>
-          setRoots((rs) =>
-            rs.map((r) =>
-              r.id === root.id ? { ...r, state: "disconnected" } : r,
-            ),
-          ),
-        );
     setTabs(session.tabs || []);
     setActive(session.active || "");
     setWorkspaceName(session.name || "Workspace");
@@ -610,25 +622,86 @@ export default function App() {
     history.entries = session.history?.entries || [];
     history.index = session.history?.index ?? -1;
     setSourceScroll(session.sourceScroll || {});
+    for (const hostId of new Set(restored.map((root) => root.hostId)))
+      if (hostId !== "local") void reconnectHost(hostId).catch(() => {});
     for (const restoredDoc of documents.documents.values())
       if (restoredDoc.hostId === "local") void validateRestored(restoredDoc);
     documents.emit();
   }
+  function reconnectHost(hostId: string, interactive = false): Promise<void> {
+    if (updates.frozenRef.current) return Promise.resolve();
+    const pending = remoteReconnects.current.get(hostId);
+    if (pending) return pending;
+    const run = Promise.resolve().then(async () => {
+      setRoots((current) =>
+        current.map((root) =>
+          root.hostId === hostId
+            ? { ...root, state: "connecting", connectionError: undefined }
+            : root,
+        ),
+      );
+      try {
+        await request("remote.connect", { hostId, interactive });
+        await reattachProviderRoots(hostId);
+      } catch (error) {
+        setRoots((current) =>
+          current.map((root) =>
+            root.hostId === hostId
+              ? {
+                  ...root,
+                  state: "disconnected",
+                  connectionError:
+                    error instanceof Error ? error.message : String(error),
+                }
+              : root,
+          ),
+        );
+        throw error;
+      } finally {
+        remoteReconnects.current.delete(hostId);
+      }
+    });
+    remoteReconnects.current.set(hostId, run);
+    return run;
+  }
   async function reattachProviderRoots(hostId: string) {
     const attached = languages.roots.filter((root) => root.hostId === hostId);
     for (const root of attached) {
-      const checked = await openRestoredRoot(root);
-      setRoots((current) =>
-        current.map((item) =>
-          item.hostId === hostId && item.id === root.id ? checked : item,
-        ),
-      );
+      try {
+        const checked = await openRestoredRoot(root);
+        setRoots((current) =>
+          current.map((item) =>
+            item.hostId === hostId && item.id === root.id ? checked : item,
+          ),
+        );
+      } catch (error) {
+        if (
+          ["DISCONNECTED", "SSH_TIMEOUT", "HOST_DISCONNECTED"].includes(
+            (error as any)?.code,
+          )
+        )
+          throw error;
+        // One deleted/inaccessible folder must not block other roots on the host.
+        setRoots((current) =>
+          current.map((item) =>
+            item.hostId === hostId && item.id === root.id
+              ? {
+                  ...item,
+                  state: "unavailable",
+                  connectionError:
+                    error instanceof Error ? error.message : String(error),
+                }
+              : item,
+          ),
+        );
+      }
     }
     for (const document of documents.documents.values()) {
       if (document.hostId !== hostId) continue;
-      await validateRestored(document);
       const owner = ownerOf(languages.roots, hostId, document.path);
-      if (owner) void languages.ensure(owner, document).catch(fail);
+      if (owner?.state !== "ready") continue;
+      await validateRestored(document);
+      void languages.ensure(owner, document).catch(fail);
     }
   }
   async function openManifest(
@@ -1899,6 +1972,7 @@ export default function App() {
                 setTreeSelection({ hostId: root.hostId, path, folder })
               }
               onOpen={(h, p) => void open(h, p, false)}
+              onReconnect={(hostId) => reconnectHost(hostId, true)}
               onMenu={(e, root, path, folder) =>
                 setMenu({
                   x: e.clientX,
@@ -1942,14 +2016,9 @@ export default function App() {
                           {
                             label: "Reconnect",
                             action: async () => {
-                              try {
-                                await request("remote.connect", {
-                                  hostId: root.hostId,
-                                });
-                                await reattachProviderRoots(root.hostId);
-                              } catch (e) {
-                                fail(e);
-                              }
+                              await reconnectHost(root.hostId, true).catch(
+                                () => {},
+                              );
                             },
                             disabled:
                               root.hostId === "local"
